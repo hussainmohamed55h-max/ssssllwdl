@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <link rel="manifest" href="manifest.json">
+    <title>نظام إدارة المبيعات - أبو أمير</title>
+    <meta name="theme-color" content="#121212">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="style.css?v=1.6">
+</head>
+<body class="light-mode">
+
+    <main>
+        <section id="tab-pos" class="tab-content active">
+            <div class="header-pos">
+                <input type="text" placeholder="بحث عن منتج... 🔍">
+                <div class="cart-icon-btn" onclick="triggerFlip(this, () => openModal('cartModal'))">
+                    <i class="fas fa-shopping-cart"></i>
+                    <span class="cart-badge" id="cart-count">0</span>
+                </div>
+            </div>
+            <div class="categories-pills" id="pos-categories-pills">
+                <div class="pill active">الكل</div>
+            </div>
+            <div class="grid-3" id="pos-products-grid">
+                </div>
+        </section>
+
+        <section id="tab-products" class="tab-content">
+            <div style="display: flex; gap: 10px; margin-bottom: 20px;">
+                <button class="btn-3d" onclick="triggerFlip(this, openAddProductModal)"><i class="fas fa-plus"></i> إضافة منتج</button>
+                <button class="btn-3d btn-blue" onclick="triggerFlip(this, () => openModal('categoryModal'))"><i class="fas fa-folder-plus"></i> إدارة الفئات</button>
+            </div>
+            <h3 style="margin-bottom: 10px;">المنتجات الحالية:</h3>
+            <div class="grid-3" id="admin-products-grid">
+                </div>
+        </section>
+
+        <section id="tab-customers" class="tab-content">
+            <button class="btn-3d" onclick="triggerFlip(this, openAddCustomerModal)" style="margin-bottom: 20px;"><i class="fas fa-user-plus"></i> إضافة زبون</button>
+            <div id="customers-list">
+                </div>
+        </section>
+
+        <section id="tab-settings" class="tab-content">
+            <h2 style="margin-bottom: 20px; text-align: center;">الإعدادات والأمان</h2>
+            <div style="display: flex; flex-direction: column; gap: 15px;">
+                <button class="btn-3d" id="themeToggleBtn" onclick="triggerFlip(this, toggleTheme)">
+                    <i class="fas fa-sun"></i> المظهر: نهاري (أساسي)
+                </button>
+                <button class="btn-3d btn-blue" onclick="triggerFlip(this, exportBackup)">
+                    <i class="fas fa-download"></i> تحميل نسخة احتياطية
+                </button>
+                <button class="btn-3d btn-blue" onclick="triggerFlip(this, importBackup)">
+                    <i class="fas fa-upload"></i> رفع نسخة احتياطية
+                </button>
+                <input type="file" id="backupInput" accept=".json" style="display: none;">
+                <hr style="border-color: rgba(128,128,128,0.2);">
+                <button class="btn-3d btn-red" onclick="triggerFlip(this, () => customAlert('تم تفعيل قفل التطبيق بنجاح!'))"><i class="fas fa-lock"></i> قفل التطبيق</button>
+                <button class="btn-3d btn-red" onclick="triggerFlip(this, () => {
+                    customPrompt('أدخل كلمة السر الجديدة:', '', (val) => {
+                        if(val) customAlert('تم تغيير كلمة السر بنجاح!');
+                    });
+                })"><i class="fas fa-key"></i> تغيير كلمة السر</button>
+            </div>
+        </section>
+    </main>
+
+    <nav class="bottom-nav">
+        <div class="nav-item active" onclick="triggerFlip(this, () => switchTab('tab-pos', this))">
+            <i class="fas fa-store"></i><span>البيع</span>
+        </div>
+        <div class="nav-item" onclick="triggerFlip(this, () => switchTab('tab-products', this))">
+            <i class="fas fa-boxes"></i><span>المنتجات</span>
+        </div>
+        <div class="nav-item" onclick="triggerFlip(this, () => switchTab('tab-customers', this))">
+            <i class="fas fa-users"></i><span>الزبائن</span>
+        </div>
+        <div class="nav-item" onclick="triggerFlip(this, () => switchTab('tab-settings', this))">
+            <i class="fas fa-cog"></i><span>الإعدادات</span>
+        </div>
+    </nav>
+
+    <div id="addProductModal" class="modal">
+        <div class="modal-content">
+            <span class="close-btn" onclick="closeModal('addProductModal')"><i class="fas fa-times"></i></span>
+            <h2 id="productModalTitle" style="text-align: center; margin-bottom: 20px;">إضافة منتج</h2>
+            <input type="hidden" id="editProdId" value="">
+            
+            <div class="input-group" style="text-align: center;">
+                <input type="file" id="newProdImg" accept="image/*" style="display: none;">
+                <div id="prodImgPreview" onclick="if(!currentUploadImage) document.getElementById('newProdImg').click()" style="position: relative; width: 100px; height: 100px; overflow: hidden; background: var(--input-bg); margin: 0 auto; border-radius: 15px; display: flex; justify-content: center; align-items: center; color: var(--primary-green); font-size: 30px; cursor: pointer; border: 1px solid var(--border-color); touch-action: none;">
+                    <i class="fas fa-camera"></i>
+                </div>
+                
+                <div id="imageZoomContainer" style="display: none; margin-top: 10px; flex-direction: column; align-items: center; gap: 5px;">
+                    <label style="font-size: 11px; color: var(--text-muted);">تكبير وتحريك الصورة (بالشريط أو السحب)</label>
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <i class="fas fa-minus" onclick="adjustZoom(-0.1)" style="color: var(--primary-green); cursor: pointer;"></i>
+                        <input type="range" id="imgZoomSlider" min="1" max="5" step="0.1" value="1" style="width: 100px;">
+                        <i class="fas fa-plus" onclick="adjustZoom(0.1)" style="color: var(--primary-green); cursor: pointer;"></i>
+                    </div>
+                    <button class="btn-3d btn-blue" onclick="document.getElementById('newProdImg').click()" style="font-size: 12px; padding: 5px 10px; margin-top: 5px; width: auto;"><i class="fas fa-sync"></i> تغيير الصورة</button>
+                </div>
+            </div>
+            
+            <div class="input-group"><label>اسم المنتج</label><input type="text" id="newProdName" placeholder="مثال: شامبو"></div>
+            <div class="input-group"><label>سعر البيع</label><input type="number" id="newProdPrice" placeholder="0"></div>
+            
+            <div class="input-group">
+                <label>الفئة</label>
+                <select id="newProdCategory">
+                    <option value="">اختر الفئة...</option>
+                </select>
+            </div>
+
+            <button class="btn-3d" onclick="triggerFlip(this, saveProduct)">حفظ المنتج <i class="fas fa-save"></i></button>
+        </div>
+    </div>
+
+    <div id="categoryModal" class="modal">
+        <div class="modal-content">
+            <span class="close-btn" onclick="closeModal('categoryModal')"><i class="fas fa-times"></i></span>
+            <h2 style="text-align: center; margin-bottom: 20px;">إدارة الفئات</h2>
+            
+            <div class="input-group">
+                <label>اسم الفئة الجديدة</label>
+                <div style="display: flex; gap: 10px;">
+                    <input type="text" id="newCategoryName" placeholder="مثال: عصائر ومشروبات" style="flex: 1;">
+                    <button class="btn-3d" style="width: auto; padding: 10px 15px;" onclick="triggerFlip(this, saveCategory)"><i class="fas fa-plus"></i></button>
+                </div>
+            </div>
+
+            <h4 style="margin-bottom: 10px; border-bottom: 1px solid var(--border-color); padding-bottom: 5px;">الفئات الحالية</h4>
+            <div id="categories-list-modal" style="max-height: 200px; overflow-y: auto;">
+                </div>
+        </div>
+    </div>
+
+    <div id="addCustomerModal" class="modal">
+        <div class="modal-content">
+            <span class="close-btn" onclick="closeModal('addCustomerModal')"><i class="fas fa-times"></i></span>
+            <h2 id="customerModalTitle" style="text-align: center; margin-bottom: 20px;">إضافة زبون</h2>
+            <input type="hidden" id="editCustId" value="">
+            <div class="input-group"><label>اسم الزبون</label><input type="text" id="newCustName" placeholder="مثال: صيدلية الأمل"></div>
+            <div class="input-group"><label>رقم الهاتف</label><input type="text" id="newCustPhone" placeholder="07xxxxxxxxx"></div>
+            <div class="input-group"><label>العنوان</label><input type="text" id="newCustAddress" placeholder="المدينة، المنطقة..."></div>
+            <button class="btn-3d" onclick="triggerFlip(this, saveCustomer)">حفظ الزبون <i class="fas fa-save"></i></button>
+        </div>
+    </div>
+
+    <div id="cartModal" class="modal">
+        <div class="modal-content">
+            <span class="close-btn" onclick="closeModal('cartModal')"><i class="fas fa-times"></i></span>
+            <h2 style="text-align: center; margin-bottom: 20px;">السلة (<span id="cart-modal-count">0</span>)</h2>
+            <div id="editing-invoice-banner" style="display: none; background: rgba(255, 77, 77, 0.1); border: 1px solid #ff4d4d; color: #ff4d4d; padding: 10px; border-radius: 10px; text-align: center; margin-bottom: 15px; font-size: 13px;">
+                <i class="fas fa-exclamation-triangle"></i> أنت تقوم بتعديل فاتورة سابقة. 
+                <br><button onclick="cancelEditInvoice()" style="background: none; border: none; color: inherit; text-decoration: underline; cursor: pointer; margin-top: 5px;">إلغاء التعديل وتفريغ السلة</button>
+            </div>
+            <button class="btn-3d" onclick="closeModal('cartModal')" style="margin-bottom: 15px; background: var(--input-bg); color: var(--text-light); border: 1px dashed var(--primary-green); box-shadow: none;">➕ إضافة منتجات أخرى للسلة</button>
+            <div id="cart-items-container" style="min-height: 100px;"></div>
+            <div class="input-group" style="margin-top: 15px; position: relative;">
+                <input list="cart-customers-list" id="cart-customer-input" placeholder="اختر أو ابحث عن زبون..." style="padding-left: 35px;">
+                <i class="fas fa-chevron-down" style="position: absolute; left: 15px; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none;"></i>
+                <datalist id="cart-customers-list">
+                    <!-- Options populated dynamically -->
+                </datalist>
+            </div>
+            <div style="display: flex; justify-content: space-between; background: var(--input-bg); padding: 10px; border-radius: 10px; margin-bottom: 15px; border: 1px solid var(--border-color);">
+                <span>الإجمالي:</span>
+                <span style="color: var(--primary-green); font-weight: bold; font-size: 20px;" id="cart-total">0 د.ع</span>
+            </div>
+            <div style="display: flex; gap: 5px; margin-bottom: 15px;" id="payment-status-container">
+                <button class="btn-3d payment-btn active" data-status="واصل" data-color="var(--primary-green)" onclick="selectPayment(this)" style="flex: 1; background: var(--primary-green); color: black;">واصل</button>
+                <button class="btn-3d payment-btn" data-status="آجل" data-color="#e60000" onclick="selectPayment(this)" style="flex: 1; background: var(--input-bg); color: var(--text-light);">آجل</button>
+            </div>
+            <button class="btn-3d" onclick="triggerFlip(this, saveOrderAndShowDetails)">حفظ الطلب وتصدير <i class="fas fa-check-circle"></i></button>
+        </div>
+    </div>
+
+    <div id="orderDetailsModal" class="modal">
+        <div class="modal-content" style="background: var(--bg-dark); padding: 15px;">
+            <span class="close-btn" onclick="closeModal('orderDetailsModal')"><i class="fas fa-arrow-right"></i></span>
+            <h3 style="text-align: center; margin-bottom: 15px;">تفاصيل الطلب</h3>
+            
+            <div class="order-header-box">
+                <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
+                    <strong style="font-size: 18px;" id="od-id">طلب #1056</strong>
+                    <span class="badge-status" id="od-status">واصل</span>
+                </div>
+                <div style="color: var(--text-muted); font-size: 13px; margin-bottom: 5px;"><i class="fas fa-user"></i> <span id="od-cust">اسم الزبون</span></div>
+                <div style="color: var(--text-muted); font-size: 13px;"><i class="far fa-calendar-alt"></i> <span id="od-datetime">التاريخ والوقت</span></div>
+            </div>
+
+            <div class="order-totals-box">
+                <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                    <span>إجمالي الطلب:</span><strong id="od-total" style="color: var(--text-light);">0 د.ع</strong>
+                </div>
+            </div>
+
+            <div class="order-items-box">
+                <h4 style="margin-bottom: 10px; border-bottom: 1px solid var(--border-color); padding-bottom: 5px;">المنتجات</h4>
+                <div id="od-items-list"></div>
+                <div style="display: flex; justify-content: space-between; margin-top: 15px; font-size: 18px; font-weight: bold;">
+                    <span>الإجمالي الكلي</span><span style="color: var(--primary-green);" id="od-grand-total">0 د.ع</span>
+                </div>
+            </div>
+
+            <div style="display: flex; gap: 5px; margin-top: 15px;">
+                <button class="btn-3d" style="flex: 1;" id="btn-export-pdf"><i class="fas fa-file-pdf"></i> تصدير PDF</button>
+                <button class="btn-3d" style="flex: 1; background: #25D366; color: white;" id="btn-share-wa"><i class="fab fa-whatsapp"></i> مشاركة</button>
+            </div>
+            <button class="btn-3d btn-red" style="margin-top: 10px;" id="btn-delete-order"><i class="fas fa-trash"></i> حذف الطلب</button>
+        </div>
+    </div>
+
+    <div id="customerLedgerModal" class="modal">
+        <div class="modal-content">
+            <span class="close-btn" onclick="closeModal('customerLedgerModal')"><i class="fas fa-times"></i></span>
+            <h2 style="text-align: center; margin-bottom: 10px;" id="ledger-name">اسم الزبون</h2>
+            <div class="ledger-box"><p>إجمالي الديون المتبقية:</p><h2 id="ledger-debt">0 د.ع</h2></div>
+            <div id="ledger-invoices"></div>
+        </div>
+    </div>
+
+    <div id="customAlertModal" class="modal" style="z-index: 9999;">
+        <div class="modal-content" style="max-width: 300px; text-align: center; border-color: var(--primary-green);">
+            <div style="font-size: 40px; color: var(--primary-green); margin-bottom: 10px;"><i class="fas fa-bell"></i></div>
+            <h3 id="customAlertMessage" style="margin-bottom: 20px; line-height: 1.5;"></h3>
+            <button class="btn-3d" onclick="closeModal('customAlertModal')">حسناً</button>
+        </div>
+    </div>
+
+    <div id="customPromptModal" class="modal" style="z-index: 9999;">
+        <div class="modal-content" style="max-width: 320px; text-align: center; border-color: var(--primary-green);">
+            <h3 id="customPromptMessage" style="margin-bottom: 15px;"></h3>
+            <input type="text" id="customPromptInput" style="width: 100%; padding: 12px; margin-bottom: 20px; border-radius: 10px; border: 1px solid var(--primary-green); background: var(--input-bg); color: var(--text-light); text-align: center; font-size: 18px;" />
+            <div style="display: flex; gap: 10px;">
+                <button class="btn-3d" id="promptConfirmBtn" style="flex: 1;">موافق <i class="fas fa-check"></i></button>
+                <button class="btn-3d btn-red" onclick="closeModal('customPromptModal')" style="flex: 1;">إلغاء <i class="fas fa-times"></i></button>
+            </div>
+        </div>
+    </div>
+
+    <div id="installPrompt" style="display: none; position: fixed; bottom: 80px; left: 10px; right: 10px; background: var(--card-bg); padding: 15px; border-radius: 15px; border: 1px solid var(--primary-green); z-index: 1000; box-shadow: 0 5px 15px rgba(0,0,0,0.5); text-align: center;">
+        <h3 style="margin-top:0; color: var(--text-light);">تثبيت التطبيق</h3>
+        <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 15px;">قم بتثبيت "مكتب الجوهرة" على هاتفك للوصول السريع والعمل بدون إنترنت.</p>
+        <div style="display: flex; gap: 10px;">
+            <button class="btn-3d btn-green" id="btnInstall" style="flex: 1;">تثبيت</button>
+            <button class="btn-3d btn-red" id="btnCancelInstall" style="flex: 1;">لاحقاً</button>
+        </div>
+    </div>
+
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('./sw.js').then(registration => {
+                    console.log('ServiceWorker registration successful');
+                }).catch(err => {
+                    console.log('ServiceWorker registration failed: ', err);
+                });
+            });
+        }
+
+        let deferredPrompt;
+        const installPrompt = document.getElementById('installPrompt');
+        const btnInstall = document.getElementById('btnInstall');
+        const btnCancelInstall = document.getElementById('btnCancelInstall');
+
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            deferredPrompt = e;
+            installPrompt.style.display = 'block';
+        });
+
+        btnInstall.addEventListener('click', async () => {
+            installPrompt.style.display = 'none';
+            if (deferredPrompt) {
+                deferredPrompt.prompt();
+                const { outcome } = await deferredPrompt.userChoice;
+                console.log(`User response to the install prompt: ${outcome}`);
+                deferredPrompt = null;
+            }
+        });
+
+        btnCancelInstall.addEventListener('click', () => {
+            installPrompt.style.display = 'none';
+        });
+    </script>
+    <script src="script.js?v=1.6"></script>
+</body>
+</html>
