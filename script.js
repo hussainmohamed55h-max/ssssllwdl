@@ -1,14 +1,23 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
+const IDB_PRODUCTS_STORE = 'products';
+const IDB_SYNC_QUEUE_STORE = 'syncQueue';
+const IDB_VERSION = 3;
 
 function initIndexedDB() {
     return new Promise((resolve, reject) => {
-        let request = indexedDB.open(IDB_NAME, 1);
+        let request = indexedDB.open(IDB_NAME, IDB_VERSION);
         request.onupgradeneeded = function(e) {
             let db = e.target.result;
             if (!db.objectStoreNames.contains(IDB_STORE)) {
                 db.createObjectStore(IDB_STORE);
+            }
+            if (!db.objectStoreNames.contains(IDB_PRODUCTS_STORE)) {
+                db.createObjectStore(IDB_PRODUCTS_STORE, { keyPath: 'id' });
+            }
+            if (!db.objectStoreNames.contains(IDB_SYNC_QUEUE_STORE)) {
+                db.createObjectStore(IDB_SYNC_QUEUE_STORE, { keyPath: 'id' });
             }
         };
         request.onsuccess = function(e) { resolve(e.target.result); };
@@ -38,8 +47,522 @@ async function getFromIndexedDB(key) {
     });
 }
 
+async function getProductsFromIndexedDB() {
+    const idb = await initIndexedDB();
+    return new Promise((resolve, reject) => {
+        let transaction = idb.transaction(IDB_PRODUCTS_STORE, 'readonly');
+        let request = transaction.objectStore(IDB_PRODUCTS_STORE).getAll();
+        request.onsuccess = () => resolve(request.result || []);
+        request.onerror = (e) => reject(e.target.error);
+    });
+}
+
+function normalizeProductForStorage(product) {
+    let storedProduct = { ...product };
+    delete storedProduct.img;
+    let safeExternalUrl = value => typeof value === 'string' && !value.startsWith('data:') ? value : '';
+    storedProduct.imageUrl = safeExternalUrl(storedProduct.imageUrl);
+    storedProduct.imageId = storedProduct.imageId || null;
+    storedProduct.thumbUrl = safeExternalUrl(storedProduct.thumbUrl);
+    storedProduct.mediumUrl = safeExternalUrl(storedProduct.mediumUrl);
+    storedProduct.deleteUrl = safeExternalUrl(storedProduct.deleteUrl);
+    storedProduct.localId = storedProduct.localId || createLocalId('product');
+    storedProduct.updatedAt = Number(storedProduct.updatedAt || 0);
+    return storedProduct;
+}
+
+async function saveProductToIndexedDB(product) {
+    const idb = await initIndexedDB();
+    return new Promise((resolve, reject) => {
+        let transaction = idb.transaction(IDB_PRODUCTS_STORE, 'readwrite');
+        let storedProduct = normalizeProductForStorage(product);
+        transaction.objectStore(IDB_PRODUCTS_STORE).put(JSON.parse(JSON.stringify(storedProduct)));
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = (e) => reject(e.target.error);
+        transaction.onabort = (e) => reject(e.target.error);
+    });
+}
+
+async function deleteProductFromIndexedDB(id) {
+    const idb = await initIndexedDB();
+    return new Promise((resolve, reject) => {
+        let transaction = idb.transaction(IDB_PRODUCTS_STORE, 'readwrite');
+        transaction.objectStore(IDB_PRODUCTS_STORE).delete(id);
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = (e) => reject(e.target.error);
+        transaction.onabort = (e) => reject(e.target.error);
+    });
+}
+
+async function replaceProductsInIndexedDB(products) {
+    const idb = await initIndexedDB();
+    return new Promise((resolve, reject) => {
+        let transaction = idb.transaction(IDB_PRODUCTS_STORE, 'readwrite');
+        let store = transaction.objectStore(IDB_PRODUCTS_STORE);
+        store.clear();
+        products.forEach(product => {
+            let storedProduct = normalizeProductForStorage(product);
+            store.put(JSON.parse(JSON.stringify(storedProduct)));
+        });
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = (e) => reject(e.target.error);
+        transaction.onabort = (e) => reject(e.target.error);
+    });
+}
+
+function getAppDataWithoutProducts() {
+    const { products, ...appData } = db;
+    return appData;
+}
+
+function createSyncQueueItem(type, entityId, action, payload) {
+    return {
+        id: `${type}:${entityId}:${action}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+        type,
+        entityId,
+        action,
+        payload: JSON.parse(JSON.stringify(payload)),
+        createdAt: new Date().toISOString(),
+        retryCount: 0,
+        status: 'pending'
+    };
+}
+
+function createLocalId(prefix) {
+    if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
+        return globalThis.crypto.randomUUID();
+    }
+    return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function createInvoiceLocalId() {
+    return createLocalId('invoice');
+}
+
+async function saveAppDataAndQueueOperation(type, entityId, action, payload) {
+    const idb = await initIndexedDB();
+    const queueItem = createSyncQueueItem(type, entityId, action, payload);
+
+    return new Promise((resolve, reject) => {
+        let transaction = idb.transaction([IDB_STORE, IDB_SYNC_QUEUE_STORE], 'readwrite');
+        transaction.objectStore(IDB_STORE).put(
+            JSON.parse(JSON.stringify(getAppDataWithoutProducts())),
+            'pos_db_abu_amir'
+        );
+        transaction.objectStore(IDB_SYNC_QUEUE_STORE).put(queueItem);
+        transaction.oncomplete = () => resolve(queueItem);
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+    });
+}
+
+async function saveProductAndQueueOperation(product, action) {
+    const idb = await initIndexedDB();
+    const storedProduct = normalizeProductForStorage(product);
+    const queueItem = createSyncQueueItem('product', storedProduct.id, action, storedProduct);
+    return new Promise((resolve, reject) => {
+        const transaction = idb.transaction([IDB_PRODUCTS_STORE, IDB_STORE, IDB_SYNC_QUEUE_STORE], 'readwrite');
+        transaction.objectStore(IDB_PRODUCTS_STORE).put(JSON.parse(JSON.stringify(storedProduct)));
+        transaction.objectStore(IDB_STORE).put(
+            JSON.parse(JSON.stringify(getAppDataWithoutProducts())),
+            'pos_db_abu_amir'
+        );
+        transaction.objectStore(IDB_SYNC_QUEUE_STORE).put(queueItem);
+        transaction.oncomplete = () => resolve(queueItem);
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+    });
+}
+
+async function deleteProductAndQueueOperation(product) {
+    const idb = await initIndexedDB();
+    const queueItem = createSyncQueueItem('product', product.id, 'delete', product);
+    return new Promise((resolve, reject) => {
+        const transaction = idb.transaction(
+            [IDB_PRODUCTS_STORE, IDB_STORE, IDB_SYNC_QUEUE_STORE],
+            'readwrite'
+        );
+        transaction.objectStore(IDB_PRODUCTS_STORE).delete(product.id);
+        transaction.objectStore(IDB_STORE).put(
+            JSON.parse(JSON.stringify(getAppDataWithoutProducts())),
+            'pos_db_abu_amir'
+        );
+        transaction.objectStore(IDB_SYNC_QUEUE_STORE).put(queueItem);
+        transaction.oncomplete = () => resolve(queueItem);
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+    });
+}
+
+let syncQueueInProgress = false;
+let syncRequestedWhileRunning = false;
+
+async function getPendingSyncItems() {
+    const idb = await initIndexedDB();
+    return new Promise((resolve, reject) => {
+        const transaction = idb.transaction(IDB_SYNC_QUEUE_STORE, 'readonly');
+        const request = transaction.objectStore(IDB_SYNC_QUEUE_STORE).getAll();
+        request.onsuccess = () => resolve((request.result || [])
+            .filter(item => ['invoice', 'product', 'category'].includes(item.type) && item.status === 'pending')
+            .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))));
+        request.onerror = () => reject(request.error);
+    });
+}
+
+async function removeSyncQueueItem(id) {
+    const idb = await initIndexedDB();
+    return new Promise((resolve, reject) => {
+        const transaction = idb.transaction(IDB_SYNC_QUEUE_STORE, 'readwrite');
+        transaction.objectStore(IDB_SYNC_QUEUE_STORE).delete(id);
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+    });
+}
+
+async function incrementSyncQueueRetry(id) {
+    const idb = await initIndexedDB();
+    return new Promise((resolve, reject) => {
+        const transaction = idb.transaction(IDB_SYNC_QUEUE_STORE, 'readwrite');
+        const store = transaction.objectStore(IDB_SYNC_QUEUE_STORE);
+        const request = store.get(id);
+        request.onsuccess = () => {
+            if (!request.result) return;
+            store.put({
+                ...request.result,
+                retryCount: Number(request.result.retryCount || 0) + 1,
+                status: 'pending'
+            });
+        };
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+    });
+}
+
+function normalizeInvoiceForConvex(invoice) {
+    const optionalString = (target, key, value) => {
+        if (typeof value === 'string') target[key] = value;
+    };
+    return {
+        localId: String(invoice.localId),
+        id: Number(invoice.id),
+        customer: String(invoice.customer || ''),
+        phone: String(invoice.phone || ''),
+        date: String(invoice.date || ''),
+        time: String(invoice.time || ''),
+        status: String(invoice.status || ''),
+        statusColor: String(invoice.statusColor || ''),
+        total: Number(invoice.total || 0),
+        items: (Array.isArray(invoice.items) ? invoice.items : []).map(item => {
+            const normalizedItem = {
+                id: Number(item.id),
+                name: String(item.name || ''),
+                price: Number(item.price || 0),
+                qty: Number(item.qty || 0)
+            };
+            optionalString(normalizedItem, 'category', item.category);
+            optionalString(normalizedItem, 'imageUrl', item.imageUrl);
+            if (typeof item.imageId === 'string' || item.imageId === null) normalizedItem.imageId = item.imageId;
+            optionalString(normalizedItem, 'thumbUrl', item.thumbUrl);
+            optionalString(normalizedItem, 'mediumUrl', item.mediumUrl);
+            optionalString(normalizedItem, 'deleteUrl', item.deleteUrl);
+            if (typeof item.isHidden === 'boolean') normalizedItem.isHidden = item.isHidden;
+            optionalString(normalizedItem, 'note', item.note);
+            return normalizedItem;
+        })
+    };
+}
+
+async function sendInvoiceSyncItem(client, item) {
+    const invoiceApi = convex.anyApi.invoices;
+    if (!item.payload || !item.payload.localId) throw new Error('Invoice sync item is missing localId');
+    if (item.action === 'create') {
+        return client.mutation(invoiceApi.createInvoice, normalizeInvoiceForConvex(item.payload));
+    }
+    if (item.action === 'update') {
+        return client.mutation(invoiceApi.updateInvoice, normalizeInvoiceForConvex(item.payload));
+    }
+    if (item.action === 'delete') {
+        return client.mutation(invoiceApi.deleteInvoice, { localId: String(item.payload.localId) });
+    }
+    throw new Error(`Unsupported invoice sync action: ${item.action}`);
+}
+
+function normalizeProductForConvex(product) {
+    return {
+        localId: String(product.localId),
+        id: Number(product.id),
+        name: String(product.name || ''),
+        price: Number(product.price || 0),
+        category: String(product.category || ''),
+        imageUrl: typeof product.imageUrl === 'string' && !product.imageUrl.startsWith('data:') ? product.imageUrl : '',
+        imageId: typeof product.imageId === 'string' ? product.imageId : null,
+        thumbUrl: typeof product.thumbUrl === 'string' && !product.thumbUrl.startsWith('data:') ? product.thumbUrl : '',
+        mediumUrl: typeof product.mediumUrl === 'string' && !product.mediumUrl.startsWith('data:') ? product.mediumUrl : '',
+        deleteUrl: typeof product.deleteUrl === 'string' && !product.deleteUrl.startsWith('data:') ? product.deleteUrl : '',
+        updatedAt: Number(product.updatedAt || Date.now()),
+        ...(typeof product.isHidden === 'boolean' ? { isHidden: product.isHidden } : {})
+    };
+}
+
+async function sendProductSyncItem(client, item) {
+    const productApi = convex.anyApi.products;
+    if (!item.payload || !item.payload.localId) throw new Error('Product sync item is missing localId');
+    if (item.action === 'create') return client.mutation(productApi.createProduct, normalizeProductForConvex(item.payload));
+    if (item.action === 'update') return client.mutation(productApi.updateProduct, normalizeProductForConvex(item.payload));
+    if (item.action === 'delete') return client.mutation(productApi.deleteProduct, { localId: String(item.payload.localId) });
+    throw new Error(`Unsupported product sync action: ${item.action}`);
+}
+
+async function sendCategorySyncItem(client, item) {
+    const categoryApi = convex.anyApi.categories;
+    if (!item.payload || !item.payload.localId) throw new Error('Category sync item is missing localId');
+    const payload = {
+        localId: String(item.payload.localId),
+        id: Number(item.payload.id),
+        name: String(item.payload.name || ''),
+        updatedAt: Number(item.payload.updatedAt || Date.now())
+    };
+    if (item.action === 'create') return client.mutation(categoryApi.createCategory, payload);
+    if (item.action === 'update') return client.mutation(categoryApi.updateCategory, payload);
+    if (item.action === 'delete') return client.mutation(categoryApi.deleteCategory, { localId: payload.localId });
+    throw new Error(`Unsupported category sync action: ${item.action}`);
+}
+
+async function sendSyncQueueItem(client, item) {
+    if (item.type === 'invoice') return sendInvoiceSyncItem(client, item);
+    if (item.type === 'product') return sendProductSyncItem(client, item);
+    if (item.type === 'category') return sendCategorySyncItem(client, item);
+    throw new Error(`Unsupported sync type: ${item.type}`);
+}
+
+async function syncPendingChangesToConvex() {
+    if (!navigator.onLine) return;
+    if (syncQueueInProgress) {
+        syncRequestedWhileRunning = true;
+        return;
+    }
+    syncQueueInProgress = true;
+    try {
+        if (!globalThis.CONVEX_URL || !globalThis.convex || !convex.ConvexHttpClient) {
+            throw new Error('Convex client is not configured');
+        }
+        const client = new convex.ConvexHttpClient(globalThis.CONVEX_URL);
+        const pendingItems = await getPendingSyncItems();
+        for (const item of pendingItems) {
+            try {
+                await sendSyncQueueItem(client, item);
+                await removeSyncQueueItem(item.id);
+            } catch (error) {
+                await incrementSyncQueueRetry(item.id);
+                console.error('تعذرت مزامنة العملية، وستتم إعادة المحاولة لاحقًا.', error);
+                break;
+            }
+        }
+    } catch (error) {
+        console.error('تعذر بدء المزامنة.', error);
+    } finally {
+        syncQueueInProgress = false;
+        if (syncRequestedWhileRunning) {
+            syncRequestedWhileRunning = false;
+            syncPendingChangesToConvex();
+        }
+    }
+}
+
+function syncChangesIfOnline() {
+    if (navigator.onLine) syncPendingChangesToConvex();
+}
+
+let catalogDownloadInProgress = false;
+
+function normalizeDownloadedProduct(product) {
+    return normalizeProductForStorage({
+        localId: String(product.localId),
+        id: Number(product.id),
+        name: String(product.name || ''),
+        price: Number(product.price || 0),
+        category: String(product.category || ''),
+        imageUrl: product.imageUrl,
+        imageId: typeof product.imageId === 'string' ? product.imageId : null,
+        thumbUrl: product.thumbUrl,
+        mediumUrl: product.mediumUrl,
+        deleteUrl: product.deleteUrl,
+        ...(typeof product.isHidden === 'boolean' ? { isHidden: product.isHidden } : {}),
+        updatedAt: Number(product.updatedAt || product._creationTime || 0)
+    });
+}
+
+function normalizeDownloadedCategory(category) {
+    return {
+        localId: String(category.localId),
+        id: Number(category.id),
+        name: String(category.name || ''),
+        updatedAt: Number(category.updatedAt || category._creationTime || 0)
+    };
+}
+
+function normalizeDownloadedInvoice(invoice) {
+    return {
+        localId: String(invoice.localId),
+        id: Number(invoice.id),
+        customer: String(invoice.customer || ''),
+        phone: String(invoice.phone || ''),
+        date: String(invoice.date || ''),
+        time: String(invoice.time || ''),
+        status: String(invoice.status || ''),
+        statusColor: String(invoice.statusColor || ''),
+        total: Number(invoice.total || 0),
+        items: (Array.isArray(invoice.items) ? invoice.items : []).map(item => ({
+            ...item,
+            id: Number(item.id),
+            name: String(item.name || ''),
+            price: Number(item.price || 0),
+            qty: Number(item.qty || 0)
+        }))
+    };
+}
+
+function addMissingCustomersFromInvoices(invoices) {
+    const knownNames = new Set(db.customers.map(customer => customer.name));
+    let nextCustomerId = db.customers.length
+        ? Math.max(...db.customers.map(customer => Number(customer.id) || 0)) + 1
+        : 1;
+    invoices.forEach(invoice => {
+        const customerName = String(invoice.customer || '').trim();
+        if (!customerName || customerName === 'زبون نقدي' || knownNames.has(customerName)) return;
+        db.customers.push({
+            id: nextCustomerId++,
+            name: customerName,
+            phone: String(invoice.phone || ''),
+            address: ''
+        });
+        knownNames.add(customerName);
+    });
+}
+
+async function persistDownloadedCatalog(changedProducts) {
+    const idb = await initIndexedDB();
+    return new Promise((resolve, reject) => {
+        const transaction = idb.transaction([IDB_PRODUCTS_STORE, IDB_STORE], 'readwrite');
+        const productStore = transaction.objectStore(IDB_PRODUCTS_STORE);
+        changedProducts.forEach(product => {
+            productStore.put(JSON.parse(JSON.stringify(normalizeProductForStorage(product))));
+        });
+        transaction.objectStore(IDB_STORE).put(
+            JSON.parse(JSON.stringify(getAppDataWithoutProducts())),
+            'pos_db_abu_amir'
+        );
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+    });
+}
+
+async function mergeDownloadedCatalog(remoteProducts, remoteCategories, remoteInvoices, pendingItems) {
+    const pendingLocalIds = new Set(
+        pendingItems
+            .filter(item => item.status === 'pending' && ['product', 'category', 'invoice'].includes(item.type))
+            .map(item => `${item.type}:${item.payload && item.payload.localId}`)
+    );
+    const previousProducts = JSON.parse(JSON.stringify(db.products));
+    const previousCategories = JSON.parse(JSON.stringify(db.categories));
+    const previousInvoices = JSON.parse(JSON.stringify(db.invoices));
+    const previousCustomers = JSON.parse(JSON.stringify(db.customers));
+    const productsByLocalId = new Map(db.products.map(product => [product.localId, product]));
+    const categoriesByLocalId = new Map(db.categories.map(category => [category.localId, category]));
+    const invoicesByLocalId = new Map(db.invoices.map(invoice => [invoice.localId, invoice]));
+    const changedProducts = [];
+    const seenProductIds = new Set();
+    const seenCategoryIds = new Set();
+    const seenInvoiceIds = new Set();
+
+    remoteProducts.forEach(remote => {
+        if (!remote || typeof remote.localId !== 'string' || typeof remote.id !== 'number' || seenProductIds.has(remote.localId)) return;
+        seenProductIds.add(remote.localId);
+        if (pendingLocalIds.has(`product:${remote.localId}`)) return;
+        const downloaded = normalizeDownloadedProduct(remote);
+        const local = productsByLocalId.get(downloaded.localId);
+        if (!local) {
+            if (db.products.some(product => product.id === downloaded.id && product.localId !== downloaded.localId)) return;
+            db.products.push(downloaded);
+            productsByLocalId.set(downloaded.localId, downloaded);
+            changedProducts.push(downloaded);
+        } else if (downloaded.updatedAt > Number(local.updatedAt || 0)) {
+            Object.assign(local, downloaded);
+            changedProducts.push(local);
+        }
+    });
+
+    remoteCategories.forEach(remote => {
+        if (!remote || typeof remote.localId !== 'string' || typeof remote.id !== 'number' || seenCategoryIds.has(remote.localId)) return;
+        seenCategoryIds.add(remote.localId);
+        if (pendingLocalIds.has(`category:${remote.localId}`)) return;
+        const downloaded = normalizeDownloadedCategory(remote);
+        const local = categoriesByLocalId.get(downloaded.localId);
+        if (!local) {
+            if (db.categories.some(category => category.id === downloaded.id && category.localId !== downloaded.localId)) return;
+            db.categories.push(downloaded);
+            categoriesByLocalId.set(downloaded.localId, downloaded);
+        } else if (downloaded.updatedAt > Number(local.updatedAt || 0)) {
+            Object.assign(local, downloaded);
+        }
+    });
+
+    remoteInvoices.forEach(remote => {
+        if (!remote || typeof remote.localId !== 'string' || typeof remote.id !== 'number' || seenInvoiceIds.has(remote.localId)) return;
+        seenInvoiceIds.add(remote.localId);
+        if (pendingLocalIds.has(`invoice:${remote.localId}`)) return;
+        const downloaded = normalizeDownloadedInvoice(remote);
+        const local = invoicesByLocalId.get(downloaded.localId);
+        if (!local) {
+            if (db.invoices.some(invoice => invoice.id === downloaded.id && invoice.localId !== downloaded.localId)) return;
+            db.invoices.push(downloaded);
+            invoicesByLocalId.set(downloaded.localId, downloaded);
+        } else {
+            Object.assign(local, downloaded);
+        }
+    });
+
+    addMissingCustomersFromInvoices(db.invoices);
+
+    try {
+        await persistDownloadedCatalog(changedProducts);
+    } catch (error) {
+        db.products = previousProducts;
+        db.categories = previousCategories;
+        db.invoices = previousInvoices;
+        db.customers = previousCustomers;
+        throw error;
+    }
+}
+
+async function downloadCatalogFromConvex() {
+    if (!navigator.onLine || catalogDownloadInProgress) return false;
+    catalogDownloadInProgress = true;
+    try {
+        if (!globalThis.CONVEX_URL || !globalThis.convex || !convex.ConvexHttpClient) return false;
+        const client = new convex.ConvexHttpClient(globalThis.CONVEX_URL);
+        const [remoteProducts, remoteCategories, remoteInvoices] = await Promise.all([
+            client.query(convex.anyApi.products.getProducts, { limit: 5000 }),
+            client.query(convex.anyApi.categories.getCategories, { limit: 5000 }),
+            client.query(convex.anyApi.invoices.getInvoices, { limit: 5000 })
+        ]);
+        if (!Array.isArray(remoteProducts) || !Array.isArray(remoteCategories) || !Array.isArray(remoteInvoices)) return false;
+        const pendingItems = await getPendingSyncItems();
+        await mergeDownloadedCatalog(remoteProducts, remoteCategories, remoteInvoices, pendingItems);
+        return true;
+    } catch (error) {
+        console.warn('تعذر تنزيل بيانات Convex، وسيستمر استخدام البيانات المحلية.', error);
+        return false;
+    } finally {
+        catalogDownloadInProgress = false;
+    }
+}
+
 // قاعدة بيانات تتضمن الفئات الآن
-let db = { products: [], customers: [], cart: [], invoices: [], categories: [] };
+let db = { products: [], customers: [], cart: [], invoices: [], categories: [], posProductOrder: [] };
 
 // استرجاع البيانات من التخزين المحلي (التحديث لاستخدام IndexedDB مع دعم نقل القديم)
 async function loadAppDatabase() {
@@ -52,12 +575,35 @@ async function loadAppDatabase() {
         }
 
         if(savedDb) {
-            db.products = savedDb.products || [];
             db.customers = savedDb.customers || [];
             db.cart = savedDb.cart || [];
             db.invoices = savedDb.invoices || [];
-            db.categories = savedDb.categories || [];
+            db.posProductOrder = Array.isArray(savedDb.posProductOrder) ? savedDb.posProductOrder : [];
+            db.categories = (savedDb.categories || []).map(category => ({
+                ...category,
+                localId: category.localId || createLocalId('category'),
+                updatedAt: Number(category.updatedAt || 0)
+            }));
         }
+
+        let storedProducts = await getProductsFromIndexedDB();
+        let legacyProducts = savedDb && Array.isArray(savedDb.products) ? savedDb.products : [];
+
+        const productsNeedMetadata = storedProducts.some(product => !product.localId || typeof product.updatedAt !== 'number');
+        if (storedProducts.length > 0) {
+            db.products = storedProducts.map(normalizeProductForStorage);
+            if (productsNeedMetadata) await replaceProductsInIndexedDB(db.products);
+        } else if (legacyProducts.length > 0) {
+            db.products = legacyProducts.map(normalizeProductForStorage);
+            await replaceProductsInIndexedDB(db.products);
+        }
+
+        const categoriesNeedMetadata = savedDb && (savedDb.categories || []).some(category => !category.localId || typeof category.updatedAt !== 'number');
+        if (savedDb && (Object.prototype.hasOwnProperty.call(savedDb, 'products') || categoriesNeedMetadata)) {
+            await saveToIndexedDB('pos_db_abu_amir', getAppDataWithoutProducts());
+        }
+
+        if (navigator.onLine) await downloadCatalogFromConvex();
     } catch(e) { console.error("خطأ في قراءة البيانات", e); }
 
     // التشغيل المبدئي للواجهة بعد اكتمال تحميل البيانات
@@ -71,7 +617,7 @@ function saveLocal() {
         clearTimeout(saveLocalTimeout);
     }
     saveLocalTimeout = setTimeout(() => {
-        saveToIndexedDB('pos_db_abu_amir', db).catch(e => {
+        saveToIndexedDB('pos_db_abu_amir', getAppDataWithoutProducts()).catch(e => {
             console.error("خطأ في الحفظ", e);
             customAlert("حدث خطأ أثناء الحفظ. يرجى التأكد من مساحة الجهاز.");
         });
@@ -82,7 +628,7 @@ let activeCategoryFilter = 'الكل'; // متغير لتتبع الفئة ال�
 let editingInvoiceId = null; // متغير لتتبع الفاتورة قيد التعديل
 
 // ==========================================
-// 1. المظهر والنسخ الاحتياطي
+// 1. المظهر
 // ==========================================
 let isLightMode = true;
 function toggleTheme() {
@@ -90,38 +636,6 @@ function toggleTheme() {
     document.body.classList.toggle('light-mode', isLightMode);
     document.getElementById('themeToggleBtn').innerHTML = isLightMode ? '<i class="fas fa-sun"></i> المظهر: نهاري (أساسي)' : '<i class="fas fa-moon"></i> المظهر: ليلي';
 }
-
-function exportBackup() {
-    let dataStr = JSON.stringify(db);
-    let dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
-    let linkElement = document.createElement('a');
-    linkElement.setAttribute('href', dataUri);
-    linkElement.setAttribute('download', 'backup_sales_app.json');
-    document.body.appendChild(linkElement); linkElement.click(); document.body.removeChild(linkElement);
-    customAlert('تم تحميل النسخة الاحتياطية بنجاح!');
-}
-
-function importBackup() { document.getElementById('backupInput').click(); }
-document.getElementById('backupInput').addEventListener('change', function(event) {
-    let file = event.target.files[0]; if (!file) return;
-    let reader = new FileReader();
-    reader.onload = function(e) {
-        try {
-            let importedDb = JSON.parse(e.target.result);
-            if(importedDb && importedDb.products) {
-                db.products = importedDb.products || [];
-                db.customers = importedDb.customers || [];
-                db.cart = importedDb.cart || [];
-                db.invoices = importedDb.invoices || [];
-                db.categories = importedDb.categories || [];
-                saveLocal(); 
-                renderCategories(); renderProducts(); renderCustomers(); updateCartCustomerSelect(); updateCartUI();
-                customAlert('تم استعادة النسخة الاحتياطية بنجاح!');
-            }
-        } catch(err) { customAlert('حدث خطأ أثناء قراءة الملف!'); }
-    };
-    reader.readAsText(file); event.target.value = '';
-});
 
 // ==========================================
 // 2. التحكم بالنوافذ والتنقل
@@ -131,6 +645,7 @@ function switchTab(tabId, navElement) {
     document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
     document.getElementById(tabId).classList.add('active');
     if(navElement) navElement.classList.add('active');
+    if (tabId === 'tab-customers') renderCustomers();
 }
 function triggerFlip(btn, callback) {
     btn.classList.add('flip-animate');
@@ -142,43 +657,194 @@ function closeModal(id) { document.getElementById(id).style.display = 'none'; }
 // ==========================================
 // 3. إدارة الفئات
 // ==========================================
-function saveCategory() {
+async function saveCategory() {
     let name = document.getElementById('newCategoryName').value;
     if(!name) { customAlert('يرجى إدخال اسم الفئة'); return; }
-    db.categories.push({ id: Date.now(), name: name });
-    saveLocal();
+    const category = { localId: createLocalId('category'), id: Date.now(), name: name, updatedAt: Date.now() };
+    db.categories.push(category);
+    try {
+        await saveAppDataAndQueueOperation('category', category.id, 'create', category);
+        syncChangesIfOnline();
+    } catch (error) {
+        db.categories = db.categories.filter(item => item.id !== category.id);
+        customAlert('تعذر حفظ الفئة محليًا.');
+        return;
+    }
     document.getElementById('newCategoryName').value = '';
     renderCategories();
 }
 
-function deleteCategory(id) {
+async function deleteCategory(id) {
+    const category = db.categories.find(c => c.id === id);
+    if (!category) return;
+    const previousCategories = JSON.parse(JSON.stringify(db.categories));
+    const previousCategoryFilter = activeCategoryFilter;
     db.categories = db.categories.filter(c => c.id !== id);
     if(activeCategoryFilter !== 'الكل' && !db.categories.find(c => c.name === activeCategoryFilter)) {
         activeCategoryFilter = 'الكل';
     }
-    saveLocal();
+    try {
+        await saveAppDataAndQueueOperation('category', category.id, 'delete', category);
+        syncChangesIfOnline();
+    } catch (error) {
+        db.categories = previousCategories;
+        activeCategoryFilter = previousCategoryFilter;
+        customAlert('تعذر حفظ حذف الفئة محليًا.');
+        return;
+    }
     renderCategories();
     renderProducts();
 }
 
 function editCategory(id) {
-    let cat = db.categories.find(c => c.id == id);
-    customPrompt('تعديل اسم الفئة:', cat.name, function(newVal) {
-        if(newVal) { 
-            if(activeCategoryFilter === cat.name) activeCategoryFilter = newVal;
-            cat.name = newVal; 
-            saveLocal();
-            renderCategories(); 
-            renderProducts();
+    const cat = db.categories.find(c => c.id == id);
+    if (!cat) return;
+    customPrompt('تعديل اسم الفئة:', cat.name, async function(newVal) {
+        if (!newVal) return;
+        const previousName = cat.name;
+        const previousUpdatedAt = cat.updatedAt;
+        cat.localId = cat.localId || createLocalId('category');
+        if (activeCategoryFilter === previousName) activeCategoryFilter = newVal;
+        cat.name = newVal;
+        cat.updatedAt = Date.now();
+        try {
+            await saveAppDataAndQueueOperation('category', cat.id, 'update', cat);
+            syncChangesIfOnline();
+        } catch (error) {
+            cat.name = previousName;
+            cat.updatedAt = previousUpdatedAt;
+            if (activeCategoryFilter === newVal) activeCategoryFilter = previousName;
+            customAlert('تعذر حفظ تعديل الفئة محليًا.');
+            return;
         }
+        renderCategories();
+        renderProducts();
     });
 }
 
+const PRODUCTS_ADMIN_CODE = '1001';
+const DEFAULT_APP_LOCK_CODE = '121';
+const APP_LOCK_STORAGE_KEY = 'pos_app_locked';
+const APP_LOCK_CODE_STORAGE_KEY = 'pos_app_lock_code';
+let productsAdminNavElement = null;
+
+function getApplicationLockCode() {
+    return localStorage.getItem(APP_LOCK_CODE_STORAGE_KEY) || DEFAULT_APP_LOCK_CODE;
+}
+
+function showApplicationLock() {
+    const modal = document.getElementById('applicationLockModal');
+    const input = document.getElementById('applicationUnlockCode');
+    const error = document.getElementById('applicationUnlockError');
+    modal.style.display = 'flex';
+    input.value = '';
+    error.textContent = '';
+    setTimeout(() => input.focus(), 100);
+}
+
+function lockApplication() {
+    const salesNavElement = document.querySelectorAll('.nav-item')[0];
+    switchTab('tab-pos', salesNavElement);
+    localStorage.setItem(APP_LOCK_STORAGE_KEY, '1');
+    document.querySelectorAll('.modal').forEach(modal => {
+        if (modal.id !== 'applicationLockModal') modal.style.display = 'none';
+    });
+    showApplicationLock();
+}
+
+function unlockApplication() {
+    const input = document.getElementById('applicationUnlockCode');
+    const error = document.getElementById('applicationUnlockError');
+    const card = document.getElementById('applicationLockCard');
+    if (input.value === getApplicationLockCode()) {
+        localStorage.removeItem(APP_LOCK_STORAGE_KEY);
+        document.getElementById('applicationLockModal').style.display = 'none';
+        input.value = '';
+        error.textContent = '';
+        return;
+    }
+    error.textContent = 'الرمز غير صحيح، حاول مرة أخرى.';
+    input.value = '';
+    card.classList.remove('unlock-error');
+    void card.offsetWidth;
+    card.classList.add('unlock-error');
+    input.focus();
+}
+
+function changeApplicationLockCode() {
+    customPrompt('أدخل رمزًا محليًا جديدًا من 3 أرقام:', '', value => {
+        const newCode = String(value || '').trim();
+        if (!/^\d{3}$/.test(newCode)) {
+            customAlert('يجب أن يتكون الرمز المحلي من 3 أرقام.');
+            return;
+        }
+        localStorage.setItem(APP_LOCK_CODE_STORAGE_KEY, newCode);
+        customAlert('تم تغيير رمز قفل التطبيق بنجاح.');
+    });
+}
+
+document.getElementById('applicationUnlockCode').addEventListener('keydown', event => {
+    if (event.key === 'Enter') unlockApplication();
+});
+
+if (localStorage.getItem(APP_LOCK_STORAGE_KEY) === '1') showApplicationLock();
+
+function requestProductsAdminAccess(navElement) {
+    productsAdminNavElement = navElement;
+    const modal = document.getElementById('productsAdminModal');
+    const card = document.getElementById('productsAdminCard');
+    const input = document.getElementById('productsAdminCode');
+    document.getElementById('productsAdminError').textContent = '';
+    input.value = '';
+    card.classList.remove('admin-code-error');
+    modal.style.display = 'flex';
+    setTimeout(() => input.focus(), 250);
+}
+
+function closeProductsAdminAccess() {
+    document.getElementById('productsAdminModal').style.display = 'none';
+    document.getElementById('productsAdminCode').value = '';
+    document.getElementById('productsAdminError').textContent = '';
+    productsAdminNavElement = null;
+}
+
+function confirmProductsAdminAccess() {
+    const input = document.getElementById('productsAdminCode');
+    const error = document.getElementById('productsAdminError');
+    const card = document.getElementById('productsAdminCard');
+    if (input.value === PRODUCTS_ADMIN_CODE) {
+        const navElement = productsAdminNavElement;
+        closeProductsAdminAccess();
+        switchTab('tab-products', navElement);
+        return;
+    }
+    error.textContent = 'الرمز غير صحيح، حاول مرة أخرى.';
+    input.value = '';
+    card.classList.remove('admin-code-error');
+    void card.offsetWidth;
+    card.classList.add('admin-code-error');
+    input.focus();
+}
+
+document.getElementById('productsAdminCode').addEventListener('keydown', event => {
+    if (event.key === 'Enter') confirmProductsAdminAccess();
+});
+
 function filterProducts(category, element) {
     activeCategoryFilter = category;
+    posProductPage = 0;
     document.querySelectorAll('#pos-categories-pills .pill').forEach(p => p.classList.remove('active'));
     if(element) element.classList.add('active');
     renderProducts();
+}
+
+function getOrderedCategories() {
+    return [...db.categories].sort((first, second) => {
+        const firstOrder = Number(first.updatedAt || first.id || 0);
+        const secondOrder = Number(second.updatedAt || second.id || 0);
+        if (secondOrder !== firstOrder) return secondOrder - firstOrder;
+        return String(first.name || '').localeCompare(String(second.name || ''), 'ar');
+    });
 }
 
 function renderCategories() {
@@ -188,7 +854,7 @@ function renderCategories() {
         listModal.innerHTML = '<p style="text-align:center; color:var(--text-muted);">لا توجد فئات.</p>';
     } else {
         let listHtml = '';
-        db.categories.forEach(c => {
+        getOrderedCategories().forEach(c => {
             listHtml += `
                 <div class="category-row">
                     <strong>${c.name}</strong>
@@ -203,12 +869,12 @@ function renderCategories() {
 
     const select = document.getElementById('newProdCategory');
     let selectHtml = '<option value="">اختر الفئة...</option>';
-    db.categories.forEach(c => { selectHtml += `<option value="${c.name}">${c.name}</option>`; });
+    getOrderedCategories().forEach(c => { selectHtml += `<option value="${c.name}">${c.name}</option>`; });
     select.innerHTML = selectHtml;
 
     const pills = document.getElementById('pos-categories-pills');
     let pillsHtml = `<div class="pill ${activeCategoryFilter === 'الكل' ? 'active' : ''}" onclick="filterProducts('الكل', this)">الكل</div>`;
-    db.categories.forEach(c => { 
+    getOrderedCategories().forEach(c => {
         pillsHtml += `<div class="pill ${activeCategoryFilter === c.name ? 'active' : ''}" onclick="filterProducts('${c.name}', this)">${c.name}</div>`; 
     });
     pills.innerHTML = pillsHtml;
@@ -217,30 +883,135 @@ function renderCategories() {
 // ==========================================
 // 4. إدارة المنتجات 
 // ==========================================
-let tempProdImg = "";
 let currentUploadImage = null; // الصورة الأصلية
+let selectedProductImageFile = null;
+let currentPreviewObjectUrl = '';
+let tempProductImageUrl = '';
+let tempProductImageId = null;
+let tempProductThumbUrl = '';
+let tempProductMediumUrl = '';
+let tempProductDeleteUrl = '';
+let isProductImageUploading = false;
+let productImageUploadFailed = false;
+let productImageUploadSequence = 0;
 let imgScale = 1;
 let imgPanX = 0;
 let imgPanY = 0;
 
-document.getElementById('newProdImg').addEventListener('change', function(e) {
+const PRODUCT_IMAGE_PLACEHOLDER = 'https://placehold.co/400x400/2a2a2a/ffffff/png?text=No+Image';
+const IMGBB_UPLOAD_ENDPOINT = 'https://api.imgbb.com/1/upload';
+const IMGBB_API_KEY = '288ce1755f41bbb25a27f17f3d91c11c';
+
+function getProductImageUrl(product) {
+    let imageUrl = product.thumbUrl && typeof product.thumbUrl === 'string' && !product.thumbUrl.startsWith('data:')
+        ? product.thumbUrl
+        : product.imageUrl && typeof product.imageUrl === 'string' && !product.imageUrl.startsWith('data:')
+            ? product.imageUrl
+            : '';
+    return imageUrl || PRODUCT_IMAGE_PLACEHOLDER;
+}
+
+function getProductMediumImageUrl(product) {
+    let imageUrl = product.mediumUrl && typeof product.mediumUrl === 'string' && !product.mediumUrl.startsWith('data:')
+        ? product.mediumUrl
+        : product.imageUrl && typeof product.imageUrl === 'string' && !product.imageUrl.startsWith('data:')
+            ? product.imageUrl
+        : '';
+    return imageUrl || PRODUCT_IMAGE_PLACEHOLDER;
+}
+
+function setProductImageUploadStatus(message, isError = false) {
+    let status = document.getElementById('productImageUploadStatus');
+    status.textContent = message;
+    status.style.display = message ? 'block' : 'none';
+    status.style.color = isError ? '#dc3545' : 'var(--text-muted)';
+}
+
+function setProductSaveDisabled(disabled) {
+    let button = document.getElementById('saveProductBtn');
+    button.disabled = disabled;
+    button.style.opacity = disabled ? '0.6' : '';
+    button.style.cursor = disabled ? 'not-allowed' : '';
+}
+
+async function uploadProductImageToImgBB(file, uploadSequence) {
+    let formData = new FormData();
+    formData.append('key', IMGBB_API_KEY);
+    formData.append('image', file, file.name);
+
+    let response = await fetch(IMGBB_UPLOAD_ENDPOINT, {
+        method: 'POST',
+        body: formData
+    });
+    let result = await response.json();
+
+    if (!response.ok || result.success !== true || result.status !== 200 || !result.data || !result.data.url) {
+        throw new Error(result.error && result.error.message ? result.error.message : 'استجابة رفع الصورة غير صالحة.');
+    }
+    if (uploadSequence !== productImageUploadSequence) return;
+
+    tempProductImageId = result.data.id || null;
+    tempProductImageUrl = result.data.url;
+    tempProductThumbUrl = result.data.thumb && result.data.thumb.url ? result.data.thumb.url : '';
+    tempProductMediumUrl = result.data.medium && result.data.medium.url ? result.data.medium.url : '';
+    tempProductDeleteUrl = result.data.delete_url || '';
+}
+
+function clearProductImagePreviewObjectUrl() {
+    if (currentPreviewObjectUrl) {
+        URL.revokeObjectURL(currentPreviewObjectUrl);
+        currentPreviewObjectUrl = '';
+    }
+}
+
+document.getElementById('newProdImg').addEventListener('change', async function(e) {
     let file = e.target.files[0];
     if(file) {
-        let reader = new FileReader();
-        reader.onload = function(evt) {
-            let img = new Image();
-            img.onload = function() {
-                currentUploadImage = img;
-                imgScale = 1;
-                imgPanX = 0;
-                imgPanY = 0;
-                document.getElementById('imageZoomContainer').style.display = 'flex';
-                document.getElementById('imgZoomSlider').value = 1;
-                updateImagePreview();
+        let uploadSequence = ++productImageUploadSequence;
+        clearProductImagePreviewObjectUrl();
+        selectedProductImageFile = file;
+        tempProductImageUrl = '';
+        tempProductImageId = null;
+        tempProductThumbUrl = '';
+        tempProductMediumUrl = '';
+        tempProductDeleteUrl = '';
+        isProductImageUploading = true;
+        productImageUploadFailed = false;
+        setProductSaveDisabled(true);
+        setProductImageUploadStatus('جاري رفع الصورة');
+        currentPreviewObjectUrl = URL.createObjectURL(file);
+        let img = new Image();
+        img.onload = function() {
+            currentUploadImage = img;
+            imgScale = 1;
+            imgPanX = 0;
+            imgPanY = 0;
+            document.getElementById('imageZoomContainer').style.display = 'flex';
+            document.getElementById('imgZoomSlider').value = 1;
+            updateImagePreview();
+        };
+        img.src = currentPreviewObjectUrl;
+
+        try {
+            await uploadProductImageToImgBB(file, uploadSequence);
+            if (uploadSequence !== productImageUploadSequence) return;
+            setProductImageUploadStatus('تم رفع الصورة بنجاح');
+        } catch (error) {
+            if (uploadSequence !== productImageUploadSequence) return;
+            productImageUploadFailed = true;
+            tempProductImageUrl = '';
+            tempProductImageId = null;
+            tempProductThumbUrl = '';
+            tempProductMediumUrl = '';
+            tempProductDeleteUrl = '';
+            setProductImageUploadStatus(`فشل رفع الصورة: ${error.message}`, true);
+            customAlert(`فشل رفع الصورة: ${error.message}`);
+        } finally {
+            if (uploadSequence === productImageUploadSequence) {
+                isProductImageUploading = false;
+                setProductSaveDisabled(false);
             }
-            img.src = evt.target.result;
         }
-        reader.readAsDataURL(file);
     }
 });
 
@@ -313,20 +1084,35 @@ document.addEventListener('touchmove', e => {
 document.addEventListener('touchend', endDrag);
 
 function openAddProductModal() {
+    productImageUploadSequence++;
+    clearProductImagePreviewObjectUrl();
     currentUploadImage = null;
+    selectedProductImageFile = null;
     document.getElementById('imageZoomContainer').style.display = 'none';
     document.getElementById('productModalTitle').innerText = 'إضافة منتج';
     document.getElementById('editProdId').value = '';
     document.getElementById('newProdName').value = '';
     document.getElementById('newProdPrice').value = '';
     document.getElementById('newProdCategory').value = '';
-    tempProdImg = '';
+    tempProductImageUrl = '';
+    tempProductImageId = null;
+    tempProductThumbUrl = '';
+    tempProductMediumUrl = '';
+    tempProductDeleteUrl = '';
+    isProductImageUploading = false;
+    productImageUploadFailed = false;
+    setProductSaveDisabled(false);
+    setProductImageUploadStatus('');
+    document.getElementById('newProdImg').value = '';
     document.getElementById('prodImgPreview').innerHTML = '<i class="fas fa-camera"></i>';
     openModal('addProductModal');
 }
 
 function openEditProduct(id) {
+    productImageUploadSequence++;
+    clearProductImagePreviewObjectUrl();
     currentUploadImage = null;
+    selectedProductImageFile = null;
     document.getElementById('imageZoomContainer').style.display = 'none';
     let p = db.products.find(x => x.id == id);
     document.getElementById('productModalTitle').innerText = 'تعديل منتج';
@@ -335,8 +1121,17 @@ function openEditProduct(id) {
     document.getElementById('newProdPrice').value = p.price;
     document.getElementById('newProdCategory').value = p.category || '';
     
-    tempProdImg = p.img;
-    if(p.img && !p.img.includes('No+Image')) {
+    tempProductImageUrl = p.imageUrl || '';
+    tempProductImageId = p.imageId || null;
+    tempProductThumbUrl = p.thumbUrl || '';
+    tempProductMediumUrl = p.mediumUrl || '';
+    tempProductDeleteUrl = p.deleteUrl || '';
+    isProductImageUploading = false;
+    productImageUploadFailed = false;
+    setProductSaveDisabled(false);
+    setProductImageUploadStatus('');
+    document.getElementById('newProdImg').value = '';
+    if(tempProductImageUrl) {
         let img = new Image();
         img.onload = function() {
             currentUploadImage = img;
@@ -347,77 +1142,221 @@ function openEditProduct(id) {
             document.getElementById('imgZoomSlider').value = 1;
             updateImagePreview();
         };
-        img.src = p.img;
+        img.src = getProductMediumImageUrl(p);
     } else {
         document.getElementById('prodImgPreview').innerHTML = '<i class="fas fa-camera"></i>';
     }
     openModal('addProductModal');
 }
 
-function saveProduct() {
+async function saveProduct() {
     let name = document.getElementById('newProdName').value;
     let price = parseFloat(document.getElementById('newProdPrice').value);
     let category = document.getElementById('newProdCategory').value;
     let editId = document.getElementById('editProdId').value;
 
     if(!name || isNaN(price)) { customAlert('يرجى إدخال اسم وسعر المنتج بشكل صحيح.'); return; }
+    if(isProductImageUploading) { customAlert('يرجى انتظار اكتمال رفع الصورة.'); return; }
+    if(productImageUploadFailed) { customAlert('تعذر حفظ المنتج لأن رفع الصورة فشل. يرجى اختيار الصورة من جديد.'); return; }
     
-    if(currentUploadImage) {
-        let size = 800;
-        let canvas = document.createElement('canvas');
-        canvas.width = size;
-        canvas.height = size;
-        let ctx = canvas.getContext('2d');
-        
-        ctx.fillStyle = "#1e1e1e";
-        ctx.fillRect(0,0,size,size);
-        
-        let previewScaleRatio = size / 100;
-        let baseScale = Math.max(size / currentUploadImage.width, size / currentUploadImage.height);
-        
-        let finalWidth = currentUploadImage.width * baseScale * imgScale;
-        let finalHeight = currentUploadImage.height * baseScale * imgScale;
-        
-        let drawX = (size - finalWidth) / 2 + (imgPanX * previewScaleRatio);
-        let drawY = (size - finalHeight) / 2 + (imgPanY * previewScaleRatio);
-        
-        ctx.drawImage(currentUploadImage, drawX, drawY, finalWidth, finalHeight);
-        tempProdImg = canvas.toDataURL('image/jpeg', 0.85);
-    }
-    
-    let imgToSave = tempProdImg || 'https://placehold.co/400x400/2a2a2a/ffffff/png?text=No+Image';
-
     if(editId) {
         let p = db.products.find(x => x.id == editId);
-        p.name = name; p.price = price; p.category = category; p.img = imgToSave;
+        const previousProduct = JSON.parse(JSON.stringify(p));
+        const previousCartItem = db.cart.find(x => x.id == editId);
+        const previousCartItemData = previousCartItem ? JSON.parse(JSON.stringify(previousCartItem)) : null;
+        p.localId = p.localId || createLocalId('product');
+        p.name = name;
+        p.price = price;
+        p.category = category;
+        p.imageUrl = tempProductImageUrl;
+        p.imageId = tempProductImageId;
+        p.thumbUrl = tempProductThumbUrl;
+        p.mediumUrl = tempProductMediumUrl;
+        p.deleteUrl = tempProductDeleteUrl;
+        p.updatedAt = Date.now();
+        delete p.img;
         
         let c = db.cart.find(x => x.id == editId);
         if(c) { c.name = name; c.price = price; updateCartUI(); }
+
+        try {
+            await saveProductAndQueueOperation(p, 'update');
+            syncChangesIfOnline();
+        } catch (error) {
+            Object.assign(p, previousProduct);
+            if (previousCartItem && previousCartItemData) Object.assign(previousCartItem, previousCartItemData);
+            customAlert('تعذر حفظ تعديل المنتج محليًا.');
+            return;
+        }
         
         customAlert('تم تعديل المنتج بنجاح!');
     } else {
-        db.products.push({ id: Date.now(), name: name, price: price, category: category, img: imgToSave });
+        let product = {
+            localId: createLocalId('product'),
+            id: Date.now(),
+            name: name,
+            price: price,
+            category: category,
+            imageUrl: tempProductImageUrl,
+            imageId: tempProductImageId,
+            thumbUrl: tempProductThumbUrl,
+            mediumUrl: tempProductMediumUrl,
+            deleteUrl: tempProductDeleteUrl,
+            updatedAt: Date.now()
+        };
+        db.products.push(product);
+        try {
+            await saveProductAndQueueOperation(product, 'create');
+            syncChangesIfOnline();
+        } catch (error) {
+            db.products = db.products.filter(item => item.id !== product.id);
+            customAlert('تعذر حفظ المنتج محليًا.');
+            return;
+        }
         customAlert('تم إضافة المنتج بنجاح!');
     }
     
-    saveLocal();
+    clearProductImagePreviewObjectUrl();
+    selectedProductImageFile = null;
+    currentUploadImage = null;
     renderProducts(); closeModal('addProductModal');
 }
 
-function deleteProduct(id) {
+async function deleteProduct(id) {
+    const product = db.products.find(p => p.id == id);
+    if (!product) return;
+    const previousProducts = JSON.parse(JSON.stringify(db.products));
+    const previousCart = JSON.parse(JSON.stringify(db.cart));
     db.products = db.products.filter(p => p.id != id);
     db.cart = db.cart.filter(c => c.id != id);
-    saveLocal();
+    try {
+        await deleteProductAndQueueOperation(product);
+        syncChangesIfOnline();
+    } catch (error) {
+        db.products = previousProducts;
+        db.cart = previousCart;
+        customAlert('تعذر حفظ حذف المنتج محليًا.');
+        return;
+    }
     renderProducts(); updateCartUI(); customAlert('تم حذف المنتج بنجاح!');
 }
 
-function toggleProductLock(id) {
+async function toggleProductLock(id) {
     let p = db.products.find(x => x.id == id);
     if(p) {
+        p.localId = p.localId || createLocalId('product');
         p.isHidden = !p.isHidden;
-        saveLocal();
+        p.updatedAt = Date.now();
+        await saveProductAndQueueOperation(p, 'update');
+        syncChangesIfOnline();
         renderProducts();
     }
+}
+
+const PRODUCT_PAGE_SIZE = 60;
+let posProductPage = 0;
+let adminProductPage = 0;
+let posProductDragState = null;
+
+function getOrderedPosProducts() {
+    const savedOrder = Array.isArray(db.posProductOrder) ? db.posProductOrder.map(String) : [];
+    const orderIndex = new Map(savedOrder.map((id, index) => [id, index]));
+    return [...db.products].sort((first, second) => {
+        const firstOrder = orderIndex.has(String(first.id)) ? orderIndex.get(String(first.id)) : Number.MAX_SAFE_INTEGER;
+        const secondOrder = orderIndex.has(String(second.id)) ? orderIndex.get(String(second.id)) : Number.MAX_SAFE_INTEGER;
+        if (firstOrder !== secondOrder) return firstOrder - secondOrder;
+        return db.products.indexOf(first) - db.products.indexOf(second);
+    });
+}
+
+function saveVisiblePosProductOrder(visibleIds) {
+    const visibleSet = new Set(visibleIds.map(String));
+    let visibleIndex = 0;
+    db.posProductOrder = getOrderedPosProducts().map(product => String(product.id)).map(id =>
+        visibleSet.has(id) ? visibleIds[visibleIndex++] : id
+    );
+    saveLocal();
+}
+
+function moveDraggedProductCard(event) {
+    if (!posProductDragState || event.pointerId !== posProductDragState.pointerId) return;
+    event.preventDefault();
+
+    if (event.clientY < 90) window.scrollBy(0, -18);
+    if (event.clientY > window.innerHeight - 100) window.scrollBy(0, 18);
+
+    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest('.pos-product-card');
+    const dragged = posProductDragState.card;
+    if (!target || target === dragged || target.parentElement !== dragged.parentElement) return;
+
+    const cards = [...dragged.parentElement.querySelectorAll('.pos-product-card')];
+    const draggedIndex = cards.indexOf(dragged);
+    const targetIndex = cards.indexOf(target);
+    if (draggedIndex < targetIndex) target.after(dragged);
+    else target.before(dragged);
+    posProductDragState.moved = true;
+}
+
+function finishPosProductDrag(event) {
+    if (!posProductDragState || event.pointerId !== posProductDragState.pointerId) return;
+    const { card, handle, moved } = posProductDragState;
+    try {
+        if (handle.hasPointerCapture?.(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+    } catch (error) {
+        // قد ينتهي الالتقاط تلقائيًا على بعض متصفحات الأجهزة اللوحية.
+    }
+    window.removeEventListener('pointermove', moveDraggedProductCard);
+    window.removeEventListener('pointerup', finishPosProductDrag);
+    window.removeEventListener('pointercancel', finishPosProductDrag);
+    card.classList.remove('pos-product-dragging');
+    document.body.classList.remove('pos-product-reordering');
+
+    if (moved) {
+        const visibleIds = [...card.parentElement.querySelectorAll('.pos-product-card')]
+            .map(item => String(item.dataset.productId));
+        saveVisiblePosProductOrder(visibleIds);
+        renderProducts();
+    }
+    posProductDragState = null;
+}
+
+function startPosProductDrag(event, productId) {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    const handle = event.currentTarget;
+    const card = handle.closest('.pos-product-card');
+    if (!card) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    posProductDragState = { pointerId: event.pointerId, productId: String(productId), card, handle, moved: false };
+    try {
+        handle.setPointerCapture?.(event.pointerId);
+    } catch (error) {
+        // يستمر السحب عبر مستمعات النافذة حتى إن لم يدعم المتصفح التقاط المؤشر.
+    }
+    card.classList.add('pos-product-dragging');
+    document.body.classList.add('pos-product-reordering');
+    window.addEventListener('pointermove', moveDraggedProductCard, { passive: false });
+    window.addEventListener('pointerup', finishPosProductDrag);
+    window.addEventListener('pointercancel', finishPosProductDrag);
+}
+
+function changeProductPage(scope, page) {
+    if (scope === 'pos') posProductPage = page;
+    if (scope === 'admin') adminProductPage = page;
+    renderProducts();
+    const grid = document.getElementById(scope === 'pos' ? 'pos-products-grid' : 'admin-products-grid');
+    if (grid) grid.scrollIntoView({ block: 'start' });
+}
+
+function createProductPager(scope, currentPage, totalPages) {
+    if (totalPages <= 1) return '';
+    return `
+        <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 12px 0;">
+            <button class="btn-3d btn-blue" style="width:auto; padding:8px 14px;" onclick="changeProductPage('${scope}', ${currentPage - 1})" ${currentPage === 0 ? 'disabled' : ''}>السابق</button>
+            <span style="color:var(--text-muted); font-size:13px;">${currentPage + 1} / ${totalPages}</span>
+            <button class="btn-3d btn-blue" style="width:auto; padding:8px 14px;" onclick="changeProductPage('${scope}', ${currentPage + 1})" ${currentPage >= totalPages - 1 ? 'disabled' : ''}>التالي</button>
+        </div>`;
 }
 
 function renderProducts() {
@@ -446,7 +1385,19 @@ function renderProducts() {
 
     let posGridHtml = '';
     let adminGridHtml = '';
-    let posHasProducts = false;
+    const orderedPosProducts = getOrderedPosProducts();
+    const filteredPosProducts = orderedPosProducts.filter(p => !p.isHidden && (activeCategoryFilter === 'الكل' || p.category === activeCategoryFilter));
+    const posTotalPages = Math.max(1, Math.ceil(filteredPosProducts.length / PRODUCT_PAGE_SIZE));
+    const adminTotalPages = Math.max(1, Math.ceil(db.products.length / PRODUCT_PAGE_SIZE));
+    posProductPage = Math.min(posProductPage, posTotalPages - 1);
+    adminProductPage = Math.min(adminProductPage, adminTotalPages - 1);
+    const posVisibleIds = new Set(filteredPosProducts
+        .slice(posProductPage * PRODUCT_PAGE_SIZE, (posProductPage + 1) * PRODUCT_PAGE_SIZE)
+        .map(product => product.id));
+    const adminVisibleIds = new Set(db.products
+        .slice(adminProductPage * PRODUCT_PAGE_SIZE, (adminProductPage + 1) * PRODUCT_PAGE_SIZE)
+        .map(product => product.id));
+    let posHasProducts = filteredPosProducts.length > 0;
 
     db.products.forEach(p => {
         let catBadge = p.category ? `<div style="font-size:11px; color:var(--text-muted); margin-bottom:5px;">${p.category}</div>` : '';
@@ -455,12 +1406,12 @@ function renderProducts() {
         let lockIcon = isLocked ? "fa-lock" : "fa-unlock";
         let lockColor = isLocked ? "var(--text-muted)" : "var(--primary-green)";
         
-        adminGridHtml += `
+        if (adminVisibleIds.has(p.id)) adminGridHtml += `
             <div class="card" style="position: relative; padding: 8px;">
                 <div style="position: absolute; top: 12px; left: 12px; z-index: 2; background: rgba(0,0,0,0.5); border-radius: 50%; width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; cursor: pointer; color: ${lockColor}; font-size: 12px;" onclick="toggleProductLock(${p.id})">
                     <i class="fas ${lockIcon}"></i>
                 </div>
-                <img src="${p.img}" alt="صورة" style="width: 100%; height: auto; aspect-ratio: 1/1; object-fit: cover; border-radius: 8px; opacity: ${imgOpacity}; transition: opacity 0.3s;">
+                <img src="${getProductImageUrl(p)}" alt="صورة" loading="lazy" style="width: 100%; height: auto; aspect-ratio: 1/1; object-fit: cover; border-radius: 8px; opacity: ${imgOpacity}; transition: opacity 0.3s;">
                 <h3 style="font-size: 13px; margin: 5px 0; opacity: ${imgOpacity}; transition: opacity 0.3s;">${p.name}</h3>
                 <div style="opacity: ${imgOpacity}; transition: opacity 0.3s;">${catBadge}</div>
                 <div class="price" style="font-size: 13px; margin-bottom: 6px; opacity: ${imgOpacity}; transition: opacity 0.3s;">${p.price.toLocaleString()} د.ع</div>
@@ -470,8 +1421,11 @@ function renderProducts() {
                 </div>
             </div>`;
 
-        if (!p.isHidden && (activeCategoryFilter === 'الكل' || p.category === activeCategoryFilter)) {
-            posHasProducts = true;
+    });
+
+    orderedPosProducts.forEach(p => {
+        if (posVisibleIds.has(p.id)) {
+            let catBadge = p.category ? `<div style="font-size:11px; color:var(--text-muted); margin-bottom:5px;">${p.category}</div>` : '';
             let cartItem = db.cart.find(c => c.id == p.id);
             let posActionHtml = '';
             
@@ -489,9 +1443,10 @@ function renderProducts() {
             }
 
             posGridHtml += `
-                <div class="card" style="display: flex; flex-direction: column; justify-content: space-between; padding: 8px;">
+                <div class="card pos-product-card" data-product-id="${p.id}" style="position:relative; display:flex; flex-direction:column; justify-content:space-between; padding:8px;">
+                    <button type="button" class="pos-drag-handle" aria-label="اسحب لترتيب ${p.name}" title="اسحب لتغيير الترتيب" onpointerdown="startPosProductDrag(event, '${p.id}')"><i class="fas fa-grip-vertical"></i></button>
                     <div style="background: transparent; border: none; padding: 0; margin: 0; width: 100%; text-align: right; color: inherit; flex: 1; user-select: none; display: block;">
-                        <img src="${p.img}" alt="صورة" style="pointer-events: none; width: 100%; height: auto; aspect-ratio: 1/1; object-fit: cover; border-radius: 8px;">
+                        <img src="${getProductImageUrl(p)}" alt="صورة" loading="lazy" style="pointer-events: none; width: 100%; height: auto; aspect-ratio: 1/1; object-fit: cover; border-radius: 8px;">
                         <h3 style="pointer-events: none; font-size: 13px; margin: 5px 0;">${p.name}</h3>
                         <div style="pointer-events: none;">${catBadge}</div>
                         <div class="price" style="pointer-events: none; font-size: 13px; margin-bottom: 6px;">${p.price.toLocaleString()} د.ع</div>
@@ -503,7 +1458,11 @@ function renderProducts() {
 
     if (!posHasProducts && db.products.length > 0) {
         posGridHtml = '<p style="grid-column: span 3; text-align: center; color: var(--text-muted); margin-top: 20px;">لا توجد منتجات مسجلة في هذه الفئة.</p>';
+    } else {
+        posGridHtml += createProductPager('pos', posProductPage, posTotalPages);
     }
+
+    adminGridHtml += createProductPager('admin', adminProductPage, adminTotalPages);
 
     posGrid.innerHTML = posGridHtml;
     adminGrid.innerHTML = adminGridHtml;
@@ -581,15 +1540,34 @@ function renderCustomers() {
         return; 
     }
 
+    const latestInvoiceByCustomer = new Map();
+    db.invoices.forEach((invoice, index) => {
+        const invoiceOrder = Number(invoice.id || index);
+        const currentOrder = latestInvoiceByCustomer.get(invoice.customer) ?? -1;
+        if (invoiceOrder > currentOrder) latestInvoiceByCustomer.set(invoice.customer, invoiceOrder);
+    });
+
+    const orderedCustomers = [...db.customers].sort((first, second) => {
+        const firstSaleOrder = latestInvoiceByCustomer.get(first.name) ?? -1;
+        const secondSaleOrder = latestInvoiceByCustomer.get(second.name) ?? -1;
+        if (secondSaleOrder !== firstSaleOrder) return secondSaleOrder - firstSaleOrder;
+        const creationOrder = Number(second.id || 0) - Number(first.id || 0);
+        if (creationOrder !== 0) return creationOrder;
+        return String(first.name || '').localeCompare(String(second.name || ''), 'ar');
+    });
+
     let listHtml = '';
-    db.customers.forEach(c => {
+    orderedCustomers.forEach((c, index) => {
         let addressText = c.address ? `<div style="font-size: 11px; color: var(--text-muted); margin-top: 3px;"><i class="fas fa-map-marker-alt"></i> ${c.address}</div>` : '';
         listHtml += `
             <div class="card" style="text-align: right; display: flex; flex-direction: row; justify-content: space-between; align-items: center; margin-bottom: 10px; cursor: pointer;" onclick="openLedger('${c.name}', ${c.id})">
-                <div>
+                <div style="display:flex; align-items:center; gap:10px; min-width:0;">
+                    <span style="flex:0 0 30px; height:30px; display:grid; place-items:center; border-radius:10px; background:var(--primary-green); color:#000; font-weight:900; box-shadow:0 4px 0 var(--green-shadow);">${index + 1}</span>
+                    <div style="min-width:0;">
                     <h3 style="margin: 0; color: var(--primary-green);"><i class="fas fa-user"></i> ${c.name}</h3>
                     <span style="font-size: 12px; color: var(--text-muted);">${c.phone || ''}</span>
                     ${addressText}
+                    </div>
                 </div>
                 <div class="action-btns" style="margin: 0; display: flex; gap: 5px;">
                     <button class="btn-3d btn-blue" style="padding: 6px 10px;" onclick="editCustomer(${c.id}, event)"><i class="fas fa-pen"></i></button>
@@ -721,6 +1699,7 @@ function cancelEditInvoice() {
     editingInvoiceId = null;
     db.cart = [];
     document.getElementById('cart-customer-input').value = '';
+    clearCustomerNameWarning();
     
     // Reset payment button
     document.querySelectorAll('.payment-btn').forEach(b => { 
@@ -740,11 +1719,46 @@ function cancelEditInvoice() {
     customAlert("تم إلغاء التعديل وتفريغ السلة.");
 }
 
-function saveOrderAndShowDetails() {
+function clearCustomerNameWarning() {
+    const input = document.getElementById('cart-customer-input');
+    const group = document.getElementById('cart-customer-group');
+    const saveButton = document.getElementById('saveOrderBtn');
+    const hasCustomerName = Boolean(input && input.value.trim());
+    if (group && hasCustomerName) group.classList.remove('customer-name-missing');
+    if (input) input.setAttribute('aria-invalid', hasCustomerName ? 'false' : 'true');
+    if (saveButton) {
+        saveButton.classList.toggle('customer-save-waiting', !hasCustomerName);
+        saveButton.dataset.customerReady = hasCustomerName ? 'true' : 'false';
+    }
+}
+
+function warnMissingCustomerName() {
+    const input = document.getElementById('cart-customer-input');
+    const group = document.getElementById('cart-customer-group');
+    if (!input || !group) return;
+    group.classList.remove('customer-name-missing');
+    void group.offsetWidth;
+    group.classList.add('customer-name-missing');
+    input.setAttribute('aria-invalid', 'true');
+    input.focus({ preventScroll: true });
+    group.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+async function saveOrderAndShowDetails() {
     if(db.cart.length === 0) { customAlert("السلة فارغة!"); return; }
+
+    const customerInput = document.getElementById('cart-customer-input');
+    if (!customerInput.value.trim()) {
+        warnMissingCustomerName();
+        return;
+    }
+
+    let previousInvoices = JSON.parse(JSON.stringify(db.invoices));
+    let previousCart = JSON.parse(JSON.stringify(db.cart));
+    let previousEditingInvoiceId = editingInvoiceId;
     
-    let custInput = document.getElementById('cart-customer-input').value.trim();
-    let custName = custInput !== "" ? custInput : "زبون نقدي";
+    let custInput = customerInput.value.trim();
+    let custName = custInput;
     let custPhone = "";
     if(custInput !== "") { 
         let c = db.customers.find(x => x.name === custName); 
@@ -762,10 +1776,13 @@ function saveOrderAndShowDetails() {
     let timeString = date.toLocaleTimeString('ar-IQ', { hour: '2-digit', minute: '2-digit' });
 
     let order;
+    let queueAction = 'create';
     if (editingInvoiceId) {
         let existingIndex = db.invoices.findIndex(i => i.id === editingInvoiceId);
         if (existingIndex !== -1) {
+            queueAction = 'update';
             order = db.invoices[existingIndex];
+            order.localId = order.localId || createInvoiceLocalId();
             order.customer = custName;
             order.phone = custPhone;
             order.status = status;
@@ -774,20 +1791,37 @@ function saveOrderAndShowDetails() {
             order.items = [...db.cart];
         } else {
             let orderId = db.invoices.length > 0 ? Math.max(...db.invoices.map(i => parseInt(i.id) || 1000)) + 1 : 1000;
-            order = { id: orderId, customer: custName, phone: custPhone, date: dateString, time: timeString, status: status, statusColor: statusColor, total: total, items: [...db.cart] };
+            order = { localId: createInvoiceLocalId(), id: orderId, customer: custName, phone: custPhone, date: dateString, time: timeString, status: status, statusColor: statusColor, total: total, items: [...db.cart] };
             db.invoices.push(order);
         }
         editingInvoiceId = null;
     } else {
         let orderId = db.invoices.length > 0 ? Math.max(...db.invoices.map(i => parseInt(i.id) || 1000)) + 1 : 1000;
-        order = { id: orderId, customer: custName, phone: custPhone, date: dateString, time: timeString, status: status, statusColor: statusColor, total: total, items: [...db.cart] };
+        order = { localId: createInvoiceLocalId(), id: orderId, customer: custName, phone: custPhone, date: dateString, time: timeString, status: status, statusColor: statusColor, total: total, items: [...db.cart] };
         db.invoices.push(order);
     }
     
-    db.cart = []; saveLocal(); updateCartUI(); 
+    db.cart = [];
+
+    try {
+        await saveAppDataAndQueueOperation('invoice', order.id, queueAction, order);
+    } catch (error) {
+        db.invoices = previousInvoices;
+        db.cart = previousCart;
+        editingInvoiceId = previousEditingInvoiceId;
+        updateCartUI();
+        customAlert('تعذر حفظ الطلب محليًا. لم يتم فقدان بيانات السلة.');
+        return;
+    }
+
+    updateCartUI();
     document.getElementById('cart-customer-input').value = '';
+    clearCustomerNameWarning();
     closeModal('cartModal');
     showOrderDetails(order);
+    if (!navigator.onLine) {
+        customAlert('تم حفظ العملية محليًا وستتم مزامنتها لاحقًا.');
+    }
 }
 
 function showOrderDetails(order) {
@@ -807,9 +1841,25 @@ function showOrderDetails(order) {
 
     document.getElementById('btn-export-pdf').onclick = () => { triggerFlip(document.getElementById('btn-export-pdf'), () => exportToPDF(order)); };
     document.getElementById('btn-share-wa').onclick = () => { triggerFlip(document.getElementById('btn-share-wa'), () => shareWhatsApp(order)); };
-    document.getElementById('btn-delete-order').onclick = () => { triggerFlip(document.getElementById('btn-delete-order'), () => { db.invoices = db.invoices.filter(i => i.id != order.id); saveLocal(); closeModal('orderDetailsModal'); customAlert('تم حذف الطلب نهائياً!'); }); };
+    document.getElementById('btn-delete-order').onclick = () => { triggerFlip(document.getElementById('btn-delete-order'), () => deleteOrderFromDetails(order)); };
 
     openModal('orderDetailsModal');
+}
+
+async function deleteOrderFromDetails(order) {
+    let previousInvoices = JSON.parse(JSON.stringify(db.invoices));
+    db.invoices = db.invoices.filter(i => i.id != order.id);
+
+    try {
+        await saveAppDataAndQueueOperation('invoice', order.id, 'delete', order);
+        closeModal('orderDetailsModal');
+        customAlert(navigator.onLine
+            ? 'تم حذف الطلب نهائياً!'
+            : 'تم حفظ العملية محليًا وستتم مزامنتها لاحقًا.');
+    } catch (error) {
+        db.invoices = previousInvoices;
+        customAlert('تعذر حفظ حذف الطلب محليًا. لم يتم حذف الطلب.');
+    }
 }
 
 function exportToPDF(order) {
@@ -861,15 +1911,24 @@ function deleteInvoice(invoiceId) {
     let inv = db.invoices.find(i => i.id == invoiceId);
     if (!inv) return;
     
-    customPrompt("هل أنت متأكد من حذف هذه الفاتورة؟ (نعم/لا)", "لا", function(val) {
+    customPrompt("هل أنت متأكد من حذف هذه الفاتورة؟ (نعم/لا)", "لا", async function(val) {
         if(val === 'نعم') {
+            let previousInvoices = JSON.parse(JSON.stringify(db.invoices));
             db.invoices = db.invoices.filter(i => i.id != invoiceId);
-            saveLocal();
+            try {
+                await saveAppDataAndQueueOperation('invoice', inv.id, 'delete', inv);
+            } catch (error) {
+                db.invoices = previousInvoices;
+                customAlert('تعذر حفظ حذف الفاتورة محليًا. لم يتم حذف الفاتورة.');
+                return;
+            }
             // Refresh ledger if open
             if (document.getElementById('customerLedgerModal').style.display === 'flex') {
                 openLedger(inv.customer);
             }
-            customAlert("تم حذف الفاتورة بنجاح.");
+            customAlert(navigator.onLine
+                ? 'تم حذف الفاتورة بنجاح.'
+                : 'تم حفظ العملية محليًا وستتم مزامنتها لاحقًا.');
         }
     });
 }
@@ -884,6 +1943,7 @@ function editInvoice(invoiceId) {
             editingInvoiceId = inv.id;
             
             document.getElementById('cart-customer-input').value = inv.customer;
+            clearCustomerNameWarning();
             
             document.querySelectorAll('.payment-btn').forEach(b => { 
                 b.classList.remove('active'); 
@@ -943,4 +2003,15 @@ document.getElementById('promptConfirmBtn').addEventListener('click', function()
 });
 
 // التشغيل المبدئي
-loadAppDatabase();
+loadAppDatabase().then(() => {
+    if (navigator.onLine) syncPendingChangesToConvex();
+});
+
+window.addEventListener('online', async () => {
+    const downloaded = await downloadCatalogFromConvex();
+    if (downloaded) {
+        renderCategories();
+        renderProducts();
+    }
+    syncPendingChangesToConvex();
+});

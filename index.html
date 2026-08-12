@@ -3,13 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <link rel="manifest" href="manifest.json">
+    <link rel="manifest" href="./manifest.json">
     <title>نظام إدارة المبيعات - أبو أمير</title>
     <meta name="theme-color" content="#121212">
+    <meta name="description" content="نظام إدارة المبيعات - أبو أمير">
+    <link rel="apple-touch-icon" href="./icon-192.png">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="style.css?v=1.6">
+    <link rel="stylesheet" href="style.css?v=2.0">
 </head>
 <body class="light-mode">
 
@@ -51,20 +53,9 @@
                 <button class="btn-3d" id="themeToggleBtn" onclick="triggerFlip(this, toggleTheme)">
                     <i class="fas fa-sun"></i> المظهر: نهاري (أساسي)
                 </button>
-                <button class="btn-3d btn-blue" onclick="triggerFlip(this, exportBackup)">
-                    <i class="fas fa-download"></i> تحميل نسخة احتياطية
-                </button>
-                <button class="btn-3d btn-blue" onclick="triggerFlip(this, importBackup)">
-                    <i class="fas fa-upload"></i> رفع نسخة احتياطية
-                </button>
-                <input type="file" id="backupInput" accept=".json" style="display: none;">
                 <hr style="border-color: rgba(128,128,128,0.2);">
-                <button class="btn-3d btn-red" onclick="triggerFlip(this, () => customAlert('تم تفعيل قفل التطبيق بنجاح!'))"><i class="fas fa-lock"></i> قفل التطبيق</button>
-                <button class="btn-3d btn-red" onclick="triggerFlip(this, () => {
-                    customPrompt('أدخل كلمة السر الجديدة:', '', (val) => {
-                        if(val) customAlert('تم تغيير كلمة السر بنجاح!');
-                    });
-                })"><i class="fas fa-key"></i> تغيير كلمة السر</button>
+                <button id="lockApplicationBtn" class="btn-3d btn-red" onclick="triggerFlip(this, lockApplication)"><i class="fas fa-lock"></i> قفل التطبيق</button>
+                <button id="changeApplicationLockCodeBtn" class="btn-3d btn-red" onclick="triggerFlip(this, changeApplicationLockCode)"><i class="fas fa-key"></i> تغيير كلمة السر</button>
             </div>
         </section>
     </main>
@@ -73,7 +64,7 @@
         <div class="nav-item active" onclick="triggerFlip(this, () => switchTab('tab-pos', this))">
             <i class="fas fa-store"></i><span>البيع</span>
         </div>
-        <div class="nav-item" onclick="triggerFlip(this, () => switchTab('tab-products', this))">
+        <div class="nav-item" onclick="triggerFlip(this, () => requestProductsAdminAccess(this))">
             <i class="fas fa-boxes"></i><span>المنتجات</span>
         </div>
         <div class="nav-item" onclick="triggerFlip(this, () => switchTab('tab-customers', this))">
@@ -105,6 +96,7 @@
                     </div>
                     <button class="btn-3d btn-blue" onclick="document.getElementById('newProdImg').click()" style="font-size: 12px; padding: 5px 10px; margin-top: 5px; width: auto;"><i class="fas fa-sync"></i> تغيير الصورة</button>
                 </div>
+                <div id="productImageUploadStatus" style="display: none; margin-top: 8px; font-size: 12px; color: var(--text-muted);"></div>
             </div>
             
             <div class="input-group"><label>اسم المنتج</label><input type="text" id="newProdName" placeholder="مثال: شامبو"></div>
@@ -117,7 +109,7 @@
                 </select>
             </div>
 
-            <button class="btn-3d" onclick="triggerFlip(this, saveProduct)">حفظ المنتج <i class="fas fa-save"></i></button>
+            <button id="saveProductBtn" class="btn-3d" onclick="triggerFlip(this, saveProduct)">حفظ المنتج <i class="fas fa-save"></i></button>
         </div>
     </div>
 
@@ -162,12 +154,13 @@
             </div>
             <button class="btn-3d" onclick="closeModal('cartModal')" style="margin-bottom: 15px; background: var(--input-bg); color: var(--text-light); border: 1px dashed var(--primary-green); box-shadow: none;">➕ إضافة منتجات أخرى للسلة</button>
             <div id="cart-items-container" style="min-height: 100px;"></div>
-            <div class="input-group" style="margin-top: 15px; position: relative;">
-                <input list="cart-customers-list" id="cart-customer-input" placeholder="اختر أو ابحث عن زبون..." style="padding-left: 35px;">
+            <div id="cart-customer-group" class="input-group cart-customer-required" style="margin-top: 15px; position: relative;">
+                <input list="cart-customers-list" id="cart-customer-input" placeholder="اختر أو ابحث عن زبون..." aria-required="true" oninput="clearCustomerNameWarning()" style="padding-left: 35px;">
                 <i class="fas fa-chevron-down" style="position: absolute; left: 15px; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none;"></i>
                 <datalist id="cart-customers-list">
                     <!-- Options populated dynamically -->
                 </datalist>
+                <div id="cart-customer-error" class="cart-customer-error" role="alert">يرجى اختيار اسم الزبون أولاً</div>
             </div>
             <div style="display: flex; justify-content: space-between; background: var(--input-bg); padding: 10px; border-radius: 10px; margin-bottom: 15px; border: 1px solid var(--border-color);">
                 <span>الإجمالي:</span>
@@ -177,7 +170,7 @@
                 <button class="btn-3d payment-btn active" data-status="واصل" data-color="var(--primary-green)" onclick="selectPayment(this)" style="flex: 1; background: var(--primary-green); color: black;">واصل</button>
                 <button class="btn-3d payment-btn" data-status="آجل" data-color="#e60000" onclick="selectPayment(this)" style="flex: 1; background: var(--input-bg); color: var(--text-light);">آجل</button>
             </div>
-            <button class="btn-3d" onclick="triggerFlip(this, saveOrderAndShowDetails)">حفظ الطلب وتصدير <i class="fas fa-check-circle"></i></button>
+            <button id="saveOrderBtn" class="btn-3d customer-save-waiting" data-customer-ready="false" onclick="triggerFlip(this, saveOrderAndShowDetails)">حفظ الطلب وتصدير <i class="fas fa-check-circle"></i></button>
         </div>
     </div>
 
@@ -231,6 +224,33 @@
             <div style="font-size: 40px; color: var(--primary-green); margin-bottom: 10px;"><i class="fas fa-bell"></i></div>
             <h3 id="customAlertMessage" style="margin-bottom: 20px; line-height: 1.5;"></h3>
             <button class="btn-3d" onclick="closeModal('customAlertModal')">حسناً</button>
+        </div>
+    </div>
+
+    <div id="productsAdminModal" class="modal admin-access-modal" style="z-index: 10000;">
+        <div id="productsAdminCard" class="admin-access-card">
+            <button class="admin-access-close" type="button" onclick="closeProductsAdminAccess()" aria-label="إغلاق"><i class="fas fa-times"></i></button>
+            <div class="admin-access-icon"><i class="fas fa-user-shield"></i></div>
+            <h2>قسم خاص بالإدارة</h2>
+            <p>يرجى إدخال الرمز الإداري للدخول إلى إدارة المنتجات.</p>
+            <input id="productsAdminCode" type="password" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="••••" aria-label="الرمز الإداري">
+            <div id="productsAdminError" class="admin-access-error" role="alert"></div>
+            <button id="productsAdminConfirm" class="btn-3d admin-access-confirm" type="button" onclick="confirmProductsAdminAccess()">
+                دخول الإدارة <i class="fas fa-arrow-left"></i>
+            </button>
+        </div>
+    </div>
+
+    <div id="applicationLockModal" class="modal application-lock-modal" aria-modal="true" role="dialog">
+        <div id="applicationLockCard" class="admin-access-card application-lock-card">
+            <div class="admin-access-icon application-lock-icon"><i class="fas fa-lock"></i></div>
+            <h2>التطبيق مقفل</h2>
+            <p>أدخل الرمز الإداري لفتح النظام والمتابعة.</p>
+            <input id="applicationUnlockCode" type="password" inputmode="numeric" maxlength="3" autocomplete="off" placeholder="•••" aria-label="رمز فتح التطبيق">
+            <div id="applicationUnlockError" class="admin-access-error" role="alert"></div>
+            <button id="applicationUnlockBtn" class="btn-3d admin-access-confirm" type="button" onclick="unlockApplication()">
+                فتح التطبيق <i class="fas fa-unlock"></i>
+            </button>
         </div>
     </div>
 
@@ -290,6 +310,8 @@
             installPrompt.style.display = 'none';
         });
     </script>
-    <script src="script.js?v=1.6"></script>
+    <script src="./vendor/convex.browser.bundle.js"></script>
+    <script src="./convex-config.js"></script>
+    <script src="script.js?v=3.2"></script>
 </body>
 </html>
