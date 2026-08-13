@@ -1,11 +1,11 @@
-const CACHE_NAME = 'pos-offline-v17';
+const CACHE_NAME = 'pos-offline-v21';
 const PRODUCT_IMAGES_CACHE = 'pos-product-images-v1';
 const urlsToCache = [
     './',
     './index.html',
     './manifest.json',
     './style.css?v=2.0',
-    './script.js?v=3.2',
+    './script.js?v=3.6',
     './convex-config.js',
     './vendor/convex.browser.bundle.js',
     './icon-192.png',
@@ -24,10 +24,11 @@ self.addEventListener('install', event => {
     );
 });
 
-function isImgBBProductImage(request) {
+function isRemoteProductImage(request) {
     if (request.method !== 'GET' || request.destination !== 'image') return false;
     const hostname = new URL(request.url).hostname;
-    return hostname === 'i.ibb.co' || hostname.endsWith('.i.ibb.co');
+    return hostname === 'i.ibb.co' || hostname.endsWith('.i.ibb.co') ||
+        hostname.endsWith('.convex.cloud') || hostname.endsWith('.convex.site');
 }
 
 function createOfflineImagePlaceholder() {
@@ -62,7 +63,7 @@ async function getCachedProductImage(request) {
 }
 
 self.addEventListener('fetch', event => {
-    if (isImgBBProductImage(event.request)) {
+    if (isRemoteProductImage(event.request)) {
         event.respondWith(getCachedProductImage(event.request));
         return;
     }

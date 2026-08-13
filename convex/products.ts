@@ -26,10 +26,22 @@ export const updateProduct = mutation({
     const existing = await ctx.db.query("products")
       .withIndex("by_localId", q => q.eq("localId", args.localId)).unique();
     if (!existing) throw new Error("Product not found");
+    const previousStorageId = existing.storageId;
     await ctx.db.replace(existing._id, {
       ...args,
       updatedAt: args.updatedAt ?? Date.now(),
     });
+    if (previousStorageId && previousStorageId !== args.storageId) {
+      const otherProduct = await ctx.db.query("products")
+        .filter(q => q.eq(q.field("storageId"), previousStorageId)).first();
+      const invoices = await ctx.db.query("invoices").take(5000);
+      const usedByInvoice = invoices.some(invoice =>
+        invoice.items.some(item => item.storageId === previousStorageId)
+      );
+      if (!otherProduct && !usedByInvoice && await ctx.db.system.get(previousStorageId)) {
+        await ctx.storage.delete(previousStorageId);
+      }
+    }
     return existing._id;
   },
 });
@@ -40,7 +52,19 @@ export const deleteProduct = mutation({
     const existing = await ctx.db.query("products")
       .withIndex("by_localId", q => q.eq("localId", args.localId)).unique();
     if (!existing) return false;
+    const storageId = existing.storageId;
     await ctx.db.delete(existing._id);
+    if (storageId) {
+      const otherProduct = await ctx.db.query("products")
+        .filter(q => q.eq(q.field("storageId"), storageId)).first();
+      const invoices = await ctx.db.query("invoices").take(5000);
+      const usedByInvoice = invoices.some(invoice =>
+        invoice.items.some(item => item.storageId === storageId)
+      );
+      if (!otherProduct && !usedByInvoice && await ctx.db.system.get(storageId)) {
+        await ctx.storage.delete(storageId);
+      }
+    }
     return true;
   },
 });
