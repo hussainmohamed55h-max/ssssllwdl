@@ -83,7 +83,7 @@
             
             <div class="input-group" style="text-align: center;">
                 <input type="file" id="newProdImg" accept="image/*" style="display: none;">
-                <div id="prodImgPreview" onclick="if(!currentUploadImage) document.getElementById('newProdImg').click()" style="position: relative; width: 100px; height: 100px; overflow: hidden; background: var(--input-bg); margin: 0 auto; border-radius: 15px; display: flex; justify-content: center; align-items: center; color: var(--primary-green); font-size: 30px; cursor: pointer; border: 1px solid var(--border-color); touch-action: none;">
+                <div id="prodImgPreview" onclick="if(!currentUploadImage) { const input = document.getElementById('newProdImg'); input.value = ''; input.click(); }" style="position: relative; width: 100px; height: 100px; overflow: hidden; background: var(--input-bg); margin: 0 auto; border-radius: 15px; display: flex; justify-content: center; align-items: center; color: var(--primary-green); font-size: 30px; cursor: pointer; border: 1px solid var(--border-color); touch-action: none;">
                     <i class="fas fa-camera"></i>
                 </div>
                 
@@ -94,7 +94,7 @@
                         <input type="range" id="imgZoomSlider" min="1" max="5" step="0.1" value="1" style="width: 100px;">
                         <i class="fas fa-plus" onclick="adjustZoom(0.1)" style="color: var(--primary-green); cursor: pointer;"></i>
                     </div>
-                    <button class="btn-3d btn-blue" onclick="document.getElementById('newProdImg').click()" style="font-size: 12px; padding: 5px 10px; margin-top: 5px; width: auto;"><i class="fas fa-sync"></i> تغيير الصورة</button>
+                    <button class="btn-3d btn-blue" onclick="const input = document.getElementById('newProdImg'); input.value = ''; input.click();" style="font-size: 12px; padding: 5px 10px; margin-top: 5px; width: auto;"><i class="fas fa-sync"></i> تغيير الصورة</button>
                 </div>
                 <div id="productImageUploadStatus" style="display: none; margin-top: 8px; font-size: 12px; color: var(--text-muted);"></div>
             </div>
@@ -312,6 +312,6 @@
     </script>
     <script src="./vendor/convex.browser.bundle.js"></script>
     <script src="./convex-config.js"></script>
-    <script src="script.js?v=3.2"></script>
+    <script src="script.js?v=3.6"></script>
 </body>
 </html>

@@ -63,6 +63,7 @@ function normalizeProductForStorage(product) {
     let safeExternalUrl = value => typeof value === 'string' && !value.startsWith('data:') ? value : '';
     storedProduct.imageUrl = safeExternalUrl(storedProduct.imageUrl);
     storedProduct.imageId = storedProduct.imageId || null;
+    storedProduct.storageId = typeof storedProduct.storageId === 'string' ? storedProduct.storageId : '';
     storedProduct.thumbUrl = safeExternalUrl(storedProduct.thumbUrl);
     storedProduct.mediumUrl = safeExternalUrl(storedProduct.mediumUrl);
     storedProduct.deleteUrl = safeExternalUrl(storedProduct.deleteUrl);
@@ -264,6 +265,7 @@ function normalizeInvoiceForConvex(invoice) {
             optionalString(normalizedItem, 'category', item.category);
             optionalString(normalizedItem, 'imageUrl', item.imageUrl);
             if (typeof item.imageId === 'string' || item.imageId === null) normalizedItem.imageId = item.imageId;
+            optionalString(normalizedItem, 'storageId', item.storageId);
             optionalString(normalizedItem, 'thumbUrl', item.thumbUrl);
             optionalString(normalizedItem, 'mediumUrl', item.mediumUrl);
             optionalString(normalizedItem, 'deleteUrl', item.deleteUrl);
@@ -298,6 +300,7 @@ function normalizeProductForConvex(product) {
         category: String(product.category || ''),
         imageUrl: typeof product.imageUrl === 'string' && !product.imageUrl.startsWith('data:') ? product.imageUrl : '',
         imageId: typeof product.imageId === 'string' ? product.imageId : null,
+        ...(typeof product.storageId === 'string' && product.storageId ? { storageId: product.storageId } : {}),
         thumbUrl: typeof product.thumbUrl === 'string' && !product.thumbUrl.startsWith('data:') ? product.thumbUrl : '',
         mediumUrl: typeof product.mediumUrl === 'string' && !product.mediumUrl.startsWith('data:') ? product.mediumUrl : '',
         deleteUrl: typeof product.deleteUrl === 'string' && !product.deleteUrl.startsWith('data:') ? product.deleteUrl : '',
@@ -386,6 +389,7 @@ function normalizeDownloadedProduct(product) {
         category: String(product.category || ''),
         imageUrl: product.imageUrl,
         imageId: typeof product.imageId === 'string' ? product.imageId : null,
+        storageId: typeof product.storageId === 'string' ? product.storageId : '',
         thumbUrl: product.thumbUrl,
         mediumUrl: product.mediumUrl,
         deleteUrl: product.deleteUrl,
@@ -652,7 +656,13 @@ function triggerFlip(btn, callback) {
     setTimeout(() => { btn.classList.remove('flip-animate'); if(callback) callback(); }, 400);
 }
 function openModal(id) { document.getElementById(id).style.display = 'flex'; }
-function closeModal(id) { document.getElementById(id).style.display = 'none'; }
+function closeModal(id) {
+    if (id === 'addProductModal') {
+        productImageUploadSequence++;
+        cleanupTemporaryProductImage();
+    }
+    document.getElementById(id).style.display = 'none';
+}
 
 // ==========================================
 // 3. إدارة الفئات
@@ -888,6 +898,7 @@ let selectedProductImageFile = null;
 let currentPreviewObjectUrl = '';
 let tempProductImageUrl = '';
 let tempProductImageId = null;
+let tempProductStorageId = '';
 let tempProductThumbUrl = '';
 let tempProductMediumUrl = '';
 let tempProductDeleteUrl = '';
@@ -899,8 +910,8 @@ let imgPanX = 0;
 let imgPanY = 0;
 
 const PRODUCT_IMAGE_PLACEHOLDER = 'https://placehold.co/400x400/2a2a2a/ffffff/png?text=No+Image';
-const IMGBB_UPLOAD_ENDPOINT = 'https://api.imgbb.com/1/upload';
-const IMGBB_API_KEY = '288ce1755f41bbb25a27f17f3d91c11c';
+const PRODUCT_IMAGE_MAX_DIMENSION = 800;
+const PRODUCT_IMAGE_WEBP_QUALITY = 0.86;
 
 function getProductImageUrl(product) {
     let imageUrl = product.thumbUrl && typeof product.thumbUrl === 'string' && !product.thumbUrl.startsWith('data:')
@@ -934,27 +945,103 @@ function setProductSaveDisabled(disabled) {
     button.style.cursor = disabled ? 'not-allowed' : '';
 }
 
-async function uploadProductImageToImgBB(file, uploadSequence) {
-    let formData = new FormData();
-    formData.append('key', IMGBB_API_KEY);
-    formData.append('image', file, file.name);
+function canvasToBlob(canvas, type, quality) {
+    return new Promise(resolve => canvas.toBlob(resolve, type, quality));
+}
 
-    let response = await fetch(IMGBB_UPLOAD_ENDPOINT, {
-        method: 'POST',
-        body: formData
-    });
-    let result = await response.json();
-
-    if (!response.ok || result.success !== true || result.status !== 200 || !result.data || !result.data.url) {
-        throw new Error(result.error && result.error.message ? result.error.message : 'استجابة رفع الصورة غير صالحة.');
+async function cleanupUnusedProductImage(storageId) {
+    if (!storageId || !globalThis.CONVEX_URL || !globalThis.convex || !convex.ConvexHttpClient) return false;
+    try {
+        const client = new convex.ConvexHttpClient(globalThis.CONVEX_URL);
+        return await client.mutation(convex.anyApi.files.deleteUnusedProductImage, { storageId });
+    } catch (error) {
+        console.warn('تعذر تنظيف صورة غير مستخدمة.', error);
+        return false;
     }
+}
+
+function cleanupTemporaryProductImage() {
+    const storageId = tempProductStorageId;
+    if (!storageId) return;
+    const editId = document.getElementById('editProdId').value;
+    const persistedProduct = editId ? db.products.find(product => product.id == editId) : null;
+    tempProductStorageId = '';
+    if (!persistedProduct || persistedProduct.storageId !== storageId) {
+        cleanupUnusedProductImage(storageId);
+    }
+}
+
+async function optimizeProductImage(file) {
+    if (!file || !String(file.type || '').startsWith('image/')) {
+        throw new Error('الملف المختار ليس صورة صالحة.');
+    }
+
+    const objectUrl = URL.createObjectURL(file);
+    try {
+        const image = await new Promise((resolve, reject) => {
+            const source = new Image();
+            source.onload = () => resolve(source);
+            source.onerror = () => reject(new Error('تعذر قراءة الصورة المختارة.'));
+            source.src = objectUrl;
+        });
+        const largestDimension = Math.max(image.naturalWidth, image.naturalHeight);
+        const scale = Math.min(1, PRODUCT_IMAGE_MAX_DIMENSION / largestDimension);
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+        canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+        const context = canvas.getContext('2d', { alpha: false });
+        if (!context) throw new Error('تعذر تجهيز الصورة للرفع.');
+        context.imageSmoothingEnabled = true;
+        context.imageSmoothingQuality = 'high';
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+        let optimized = await canvasToBlob(canvas, 'image/webp', PRODUCT_IMAGE_WEBP_QUALITY);
+        if (!optimized) optimized = await canvasToBlob(canvas, 'image/jpeg', 0.9);
+        if (!optimized) throw new Error('تعذر ضغط الصورة.');
+        return optimized;
+    } finally {
+        URL.revokeObjectURL(objectUrl);
+    }
+}
+
+async function uploadProductImageToConvex(file, uploadSequence) {
+    if (!globalThis.CONVEX_URL || !globalThis.convex || !convex.ConvexHttpClient) {
+        throw new Error('خدمة مزامنة الصور غير مهيأة.');
+    }
+
+    const optimizedImage = await optimizeProductImage(file);
     if (uploadSequence !== productImageUploadSequence) return;
 
-    tempProductImageId = result.data.id || null;
-    tempProductImageUrl = result.data.url;
-    tempProductThumbUrl = result.data.thumb && result.data.thumb.url ? result.data.thumb.url : '';
-    tempProductMediumUrl = result.data.medium && result.data.medium.url ? result.data.medium.url : '';
-    tempProductDeleteUrl = result.data.delete_url || '';
+    const client = new convex.ConvexHttpClient(globalThis.CONVEX_URL);
+    const filesApi = convex.anyApi.files;
+    const uploadUrl = await client.mutation(filesApi.generateProductImageUploadUrl, {});
+    const response = await fetch(uploadUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': optimizedImage.type || 'image/webp' },
+        body: optimizedImage
+    });
+    if (!response.ok) throw new Error('رفضت خدمة التخزين رفع الصورة.');
+
+    const result = await response.json();
+    if (!result || !result.storageId) throw new Error('لم تُرجع خدمة التخزين معرّف الصورة.');
+    if (uploadSequence !== productImageUploadSequence) {
+        cleanupUnusedProductImage(String(result.storageId));
+        return;
+    }
+    tempProductStorageId = String(result.storageId);
+    const imageUrl = await client.query(filesApi.getProductImageUrl, { storageId: result.storageId });
+    if (!imageUrl) throw new Error('تعذر إنشاء رابط الصورة.');
+    if (uploadSequence !== productImageUploadSequence) {
+        cleanupUnusedProductImage(tempProductStorageId);
+        tempProductStorageId = '';
+        return;
+    }
+
+    tempProductImageId = null;
+    tempProductImageUrl = imageUrl;
+    tempProductThumbUrl = imageUrl;
+    tempProductMediumUrl = imageUrl;
+    tempProductDeleteUrl = '';
 }
 
 function clearProductImagePreviewObjectUrl() {
@@ -968,17 +1055,19 @@ document.getElementById('newProdImg').addEventListener('change', async function(
     let file = e.target.files[0];
     if(file) {
         let uploadSequence = ++productImageUploadSequence;
+        cleanupUnusedProductImage(tempProductStorageId);
         clearProductImagePreviewObjectUrl();
         selectedProductImageFile = file;
         tempProductImageUrl = '';
         tempProductImageId = null;
+        tempProductStorageId = '';
         tempProductThumbUrl = '';
         tempProductMediumUrl = '';
         tempProductDeleteUrl = '';
         isProductImageUploading = true;
         productImageUploadFailed = false;
         setProductSaveDisabled(true);
-        setProductImageUploadStatus('جاري رفع الصورة');
+        setProductImageUploadStatus('جاري تحسين ورفع الصورة');
         currentPreviewObjectUrl = URL.createObjectURL(file);
         let img = new Image();
         img.onload = function() {
@@ -993,17 +1082,20 @@ document.getElementById('newProdImg').addEventListener('change', async function(
         img.src = currentPreviewObjectUrl;
 
         try {
-            await uploadProductImageToImgBB(file, uploadSequence);
+            await uploadProductImageToConvex(file, uploadSequence);
             if (uploadSequence !== productImageUploadSequence) return;
             setProductImageUploadStatus('تم رفع الصورة بنجاح');
         } catch (error) {
             if (uploadSequence !== productImageUploadSequence) return;
             productImageUploadFailed = true;
+            cleanupUnusedProductImage(tempProductStorageId);
             tempProductImageUrl = '';
             tempProductImageId = null;
+            tempProductStorageId = '';
             tempProductThumbUrl = '';
             tempProductMediumUrl = '';
             tempProductDeleteUrl = '';
+            document.getElementById('newProdImg').value = '';
             setProductImageUploadStatus(`فشل رفع الصورة: ${error.message}`, true);
             customAlert(`فشل رفع الصورة: ${error.message}`);
         } finally {
@@ -1096,6 +1188,7 @@ function openAddProductModal() {
     document.getElementById('newProdCategory').value = '';
     tempProductImageUrl = '';
     tempProductImageId = null;
+    tempProductStorageId = '';
     tempProductThumbUrl = '';
     tempProductMediumUrl = '';
     tempProductDeleteUrl = '';
@@ -1123,6 +1216,7 @@ function openEditProduct(id) {
     
     tempProductImageUrl = p.imageUrl || '';
     tempProductImageId = p.imageId || null;
+    tempProductStorageId = p.storageId || '';
     tempProductThumbUrl = p.thumbUrl || '';
     tempProductMediumUrl = p.mediumUrl || '';
     tempProductDeleteUrl = p.deleteUrl || '';
@@ -1170,6 +1264,7 @@ async function saveProduct() {
         p.category = category;
         p.imageUrl = tempProductImageUrl;
         p.imageId = tempProductImageId;
+        p.storageId = tempProductStorageId;
         p.thumbUrl = tempProductThumbUrl;
         p.mediumUrl = tempProductMediumUrl;
         p.deleteUrl = tempProductDeleteUrl;
@@ -1199,6 +1294,7 @@ async function saveProduct() {
             category: category,
             imageUrl: tempProductImageUrl,
             imageId: tempProductImageId,
+            storageId: tempProductStorageId,
             thumbUrl: tempProductThumbUrl,
             mediumUrl: tempProductMediumUrl,
             deleteUrl: tempProductDeleteUrl,
@@ -1219,6 +1315,7 @@ async function saveProduct() {
     clearProductImagePreviewObjectUrl();
     selectedProductImageFile = null;
     currentUploadImage = null;
+    tempProductStorageId = '';
     renderProducts(); closeModal('addProductModal');
 }
 
