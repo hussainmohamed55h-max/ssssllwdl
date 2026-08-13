@@ -1353,7 +1353,6 @@ async function toggleProductLock(id) {
 const PRODUCT_PAGE_SIZE = 60;
 let posProductPage = 0;
 let adminProductPage = 0;
-let posProductDragState = null;
 
 function getOrderedPosProducts() {
     const savedOrder = Array.isArray(db.posProductOrder) ? db.posProductOrder.map(String) : [];
@@ -1364,78 +1363,6 @@ function getOrderedPosProducts() {
         if (firstOrder !== secondOrder) return firstOrder - secondOrder;
         return db.products.indexOf(first) - db.products.indexOf(second);
     });
-}
-
-function saveVisiblePosProductOrder(visibleIds) {
-    const visibleSet = new Set(visibleIds.map(String));
-    let visibleIndex = 0;
-    db.posProductOrder = getOrderedPosProducts().map(product => String(product.id)).map(id =>
-        visibleSet.has(id) ? visibleIds[visibleIndex++] : id
-    );
-    saveLocal();
-}
-
-function moveDraggedProductCard(event) {
-    if (!posProductDragState || event.pointerId !== posProductDragState.pointerId) return;
-    event.preventDefault();
-
-    if (event.clientY < 90) window.scrollBy(0, -18);
-    if (event.clientY > window.innerHeight - 100) window.scrollBy(0, 18);
-
-    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest('.pos-product-card');
-    const dragged = posProductDragState.card;
-    if (!target || target === dragged || target.parentElement !== dragged.parentElement) return;
-
-    const cards = [...dragged.parentElement.querySelectorAll('.pos-product-card')];
-    const draggedIndex = cards.indexOf(dragged);
-    const targetIndex = cards.indexOf(target);
-    if (draggedIndex < targetIndex) target.after(dragged);
-    else target.before(dragged);
-    posProductDragState.moved = true;
-}
-
-function finishPosProductDrag(event) {
-    if (!posProductDragState || event.pointerId !== posProductDragState.pointerId) return;
-    const { card, handle, moved } = posProductDragState;
-    try {
-        if (handle.hasPointerCapture?.(event.pointerId)) handle.releasePointerCapture(event.pointerId);
-    } catch (error) {
-        // قد ينتهي الالتقاط تلقائيًا على بعض متصفحات الأجهزة اللوحية.
-    }
-    window.removeEventListener('pointermove', moveDraggedProductCard);
-    window.removeEventListener('pointerup', finishPosProductDrag);
-    window.removeEventListener('pointercancel', finishPosProductDrag);
-    card.classList.remove('pos-product-dragging');
-    document.body.classList.remove('pos-product-reordering');
-
-    if (moved) {
-        const visibleIds = [...card.parentElement.querySelectorAll('.pos-product-card')]
-            .map(item => String(item.dataset.productId));
-        saveVisiblePosProductOrder(visibleIds);
-        renderProducts();
-    }
-    posProductDragState = null;
-}
-
-function startPosProductDrag(event, productId) {
-    if (event.pointerType === 'mouse' && event.button !== 0) return;
-    const handle = event.currentTarget;
-    const card = handle.closest('.pos-product-card');
-    if (!card) return;
-
-    event.preventDefault();
-    event.stopPropagation();
-    posProductDragState = { pointerId: event.pointerId, productId: String(productId), card, handle, moved: false };
-    try {
-        handle.setPointerCapture?.(event.pointerId);
-    } catch (error) {
-        // يستمر السحب عبر مستمعات النافذة حتى إن لم يدعم المتصفح التقاط المؤشر.
-    }
-    card.classList.add('pos-product-dragging');
-    document.body.classList.add('pos-product-reordering');
-    window.addEventListener('pointermove', moveDraggedProductCard, { passive: false });
-    window.addEventListener('pointerup', finishPosProductDrag);
-    window.addEventListener('pointercancel', finishPosProductDrag);
 }
 
 function changeProductPage(scope, page) {
@@ -1541,7 +1468,6 @@ function renderProducts() {
 
             posGridHtml += `
                 <div class="card pos-product-card" data-product-id="${p.id}" style="position:relative; display:flex; flex-direction:column; justify-content:space-between; padding:8px;">
-                    <button type="button" class="pos-drag-handle" aria-label="اسحب لترتيب ${p.name}" title="اسحب لتغيير الترتيب" onpointerdown="startPosProductDrag(event, '${p.id}')"><i class="fas fa-grip-vertical"></i></button>
                     <div style="background: transparent; border: none; padding: 0; margin: 0; width: 100%; text-align: right; color: inherit; flex: 1; user-select: none; display: block;">
                         <img src="${getProductImageUrl(p)}" alt="صورة" loading="lazy" style="pointer-events: none; width: 100%; height: auto; aspect-ratio: 1/1; object-fit: cover; border-radius: 8px;">
                         <h3 style="pointer-events: none; font-size: 13px; margin: 5px 0;">${p.name}</h3>
