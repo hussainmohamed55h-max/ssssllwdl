@@ -842,7 +842,6 @@ document.getElementById('productsAdminCode').addEventListener('keydown', event =
 
 function filterProducts(category, element) {
     activeCategoryFilter = category;
-    posProductPage = 0;
     document.querySelectorAll('#pos-categories-pills .pill').forEach(p => p.classList.remove('active'));
     if(element) element.classList.add('active');
     renderProducts();
@@ -1350,10 +1349,6 @@ async function toggleProductLock(id) {
     }
 }
 
-const PRODUCT_PAGE_SIZE = 60;
-let posProductPage = 0;
-let adminProductPage = 0;
-
 function getOrderedPosProducts() {
     const savedOrder = Array.isArray(db.posProductOrder) ? db.posProductOrder.map(String) : [];
     const orderIndex = new Map(savedOrder.map((id, index) => [id, index]));
@@ -1365,22 +1360,23 @@ function getOrderedPosProducts() {
     });
 }
 
-function changeProductPage(scope, page) {
-    if (scope === 'pos') posProductPage = page;
-    if (scope === 'admin') adminProductPage = page;
-    renderProducts();
-    const grid = document.getElementById(scope === 'pos' ? 'pos-products-grid' : 'admin-products-grid');
-    if (grid) grid.scrollIntoView({ block: 'start' });
-}
+let lastOfflineImageCacheSignature = '';
 
-function createProductPager(scope, currentPage, totalPages) {
-    if (totalPages <= 1) return '';
-    return `
-        <div style="grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 12px 0;">
-            <button class="btn-3d btn-blue" style="width:auto; padding:8px 14px;" onclick="changeProductPage('${scope}', ${currentPage - 1})" ${currentPage === 0 ? 'disabled' : ''}>السابق</button>
-            <span style="color:var(--text-muted); font-size:13px;">${currentPage + 1} / ${totalPages}</span>
-            <button class="btn-3d btn-blue" style="width:auto; padding:8px 14px;" onclick="changeProductPage('${scope}', ${currentPage + 1})" ${currentPage >= totalPages - 1 ? 'disabled' : ''}>التالي</button>
-        </div>`;
+function cacheProductImagesForOffline() {
+    if (!navigator.onLine || !('serviceWorker' in navigator) || db.products.length === 0) return;
+    const imageUrls = [...new Set(db.products.flatMap(product => [
+        getProductImageUrl(product),
+        getProductMediumImageUrl(product)
+    ]).filter(url => url && url !== PRODUCT_IMAGE_PLACEHOLDER))];
+    const signature = imageUrls.join('|');
+    if (!signature || signature === lastOfflineImageCacheSignature) return;
+
+    navigator.serviceWorker.ready.then(registration => {
+        const worker = registration.active || navigator.serviceWorker.controller;
+        if (!worker) return;
+        worker.postMessage({ type: 'CACHE_PRODUCT_IMAGES', urls: imageUrls });
+        lastOfflineImageCacheSignature = signature;
+    }).catch(error => console.warn('تعذر تجهيز صور المنتجات للعمل دون إنترنت.', error));
 }
 
 function renderProducts() {
@@ -1411,16 +1407,6 @@ function renderProducts() {
     let adminGridHtml = '';
     const orderedPosProducts = getOrderedPosProducts();
     const filteredPosProducts = orderedPosProducts.filter(p => !p.isHidden && (activeCategoryFilter === 'الكل' || p.category === activeCategoryFilter));
-    const posTotalPages = Math.max(1, Math.ceil(filteredPosProducts.length / PRODUCT_PAGE_SIZE));
-    const adminTotalPages = Math.max(1, Math.ceil(db.products.length / PRODUCT_PAGE_SIZE));
-    posProductPage = Math.min(posProductPage, posTotalPages - 1);
-    adminProductPage = Math.min(adminProductPage, adminTotalPages - 1);
-    const posVisibleIds = new Set(filteredPosProducts
-        .slice(posProductPage * PRODUCT_PAGE_SIZE, (posProductPage + 1) * PRODUCT_PAGE_SIZE)
-        .map(product => product.id));
-    const adminVisibleIds = new Set(db.products
-        .slice(adminProductPage * PRODUCT_PAGE_SIZE, (adminProductPage + 1) * PRODUCT_PAGE_SIZE)
-        .map(product => product.id));
     let posHasProducts = filteredPosProducts.length > 0;
 
     db.products.forEach(p => {
@@ -1430,7 +1416,7 @@ function renderProducts() {
         let lockIcon = isLocked ? "fa-lock" : "fa-unlock";
         let lockColor = isLocked ? "var(--text-muted)" : "var(--primary-green)";
         
-        if (adminVisibleIds.has(p.id)) adminGridHtml += `
+        adminGridHtml += `
             <div class="card" style="position: relative; padding: 8px;">
                 <div style="position: absolute; top: 12px; left: 12px; z-index: 2; background: rgba(0,0,0,0.5); border-radius: 50%; width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; cursor: pointer; color: ${lockColor}; font-size: 12px;" onclick="toggleProductLock(${p.id})">
                     <i class="fas ${lockIcon}"></i>
@@ -1448,7 +1434,7 @@ function renderProducts() {
     });
 
     orderedPosProducts.forEach(p => {
-        if (posVisibleIds.has(p.id)) {
+        if (!p.isHidden && (activeCategoryFilter === 'الكل' || p.category === activeCategoryFilter)) {
             let catBadge = p.category ? `<div style="font-size:11px; color:var(--text-muted); margin-bottom:5px;">${p.category}</div>` : '';
             let cartItem = db.cart.find(c => c.id == p.id);
             let posActionHtml = '';
@@ -1481,14 +1467,11 @@ function renderProducts() {
 
     if (!posHasProducts && db.products.length > 0) {
         posGridHtml = '<p style="grid-column: span 3; text-align: center; color: var(--text-muted); margin-top: 20px;">لا توجد منتجات مسجلة في هذه الفئة.</p>';
-    } else {
-        posGridHtml += createProductPager('pos', posProductPage, posTotalPages);
     }
-
-    adminGridHtml += createProductPager('admin', adminProductPage, adminTotalPages);
 
     posGrid.innerHTML = posGridHtml;
     adminGrid.innerHTML = adminGridHtml;
+    cacheProductImagesForOffline();
 }
 
 // ==========================================
@@ -2037,4 +2020,5 @@ window.addEventListener('online', async () => {
         renderProducts();
     }
     syncPendingChangesToConvex();
+    cacheProductImagesForOffline();
 });

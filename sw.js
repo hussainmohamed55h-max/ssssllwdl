@@ -1,11 +1,11 @@
-const CACHE_NAME = 'pos-offline-v22';
+const CACHE_NAME = 'pos-offline-v23';
 const PRODUCT_IMAGES_CACHE = 'pos-product-images-v1';
 const urlsToCache = [
     './',
     './index.html',
     './manifest.json',
     './style.css?v=2.0',
-    './script.js?v=3.7',
+    './script.js?v=3.8',
     './convex-config.js',
     './vendor/convex.browser.bundle.js',
     './icon-192.png',
@@ -22,6 +22,39 @@ self.addEventListener('install', event => {
             ))
             .then(() => self.skipWaiting())
     );
+});
+
+async function cacheProductImages(urls) {
+    const imageCache = await caches.open(PRODUCT_IMAGES_CACHE);
+    const uniqueUrls = [...new Set((Array.isArray(urls) ? urls : []).filter(url =>
+        typeof url === 'string' && /^https:\/\//i.test(url)
+    ))];
+    let nextIndex = 0;
+
+    async function cacheNextImage() {
+        while (nextIndex < uniqueUrls.length) {
+            const url = uniqueUrls[nextIndex++];
+            try {
+                if (await imageCache.match(url)) continue;
+                const request = new Request(url, { mode: 'no-cors', credentials: 'omit' });
+                const response = await fetch(request);
+                if (response && (response.ok || response.type === 'opaque')) {
+                    await imageCache.put(request, response.clone());
+                }
+            } catch (error) {
+                // تبقى الصورة قابلة للتنزيل في المحاولة التالية عند عودة الاتصال.
+            }
+        }
+    }
+
+    const workerCount = Math.min(4, uniqueUrls.length);
+    await Promise.all(Array.from({ length: workerCount }, () => cacheNextImage()));
+}
+
+self.addEventListener('message', event => {
+    if (event.data && event.data.type === 'CACHE_PRODUCT_IMAGES') {
+        event.waitUntil(cacheProductImages(event.data.urls));
+    }
 });
 
 function isRemoteProductImage(request) {
