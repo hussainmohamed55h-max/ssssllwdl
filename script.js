@@ -1321,6 +1321,12 @@ async function saveProduct() {
 async function deleteProduct(id) {
     const product = db.products.find(p => p.id == id);
     if (!product) return;
+    customConfirm(`هل أنت متأكد من حذف المنتج «${product.name}»؟`, () => confirmDeleteProduct(id));
+}
+
+async function confirmDeleteProduct(id) {
+    const product = db.products.find(p => p.id == id);
+    if (!product) return;
     const previousProducts = JSON.parse(JSON.stringify(db.products));
     const previousCart = JSON.parse(JSON.stringify(db.cart));
     db.products = db.products.filter(p => p.id != id);
@@ -1999,6 +2005,24 @@ function openLedger(name, custId) {
 
 // دوال التنبيهات
 function customAlert(message) { document.getElementById('customAlertMessage').innerText = message; openModal('customAlertModal'); }
+let currentConfirmCallback = null;
+function customConfirm(message, callback) {
+    document.getElementById('customConfirmMessage').innerText = message;
+    currentConfirmCallback = callback;
+    openModal('customConfirmModal');
+    setTimeout(() => document.getElementById('customConfirmCancelBtn').focus(), 100);
+}
+function closeCustomConfirm() {
+    currentConfirmCallback = null;
+    closeModal('customConfirmModal');
+}
+document.getElementById('customConfirmYesBtn').addEventListener('click', function() {
+    const callback = currentConfirmCallback;
+    currentConfirmCallback = null;
+    closeModal('customConfirmModal');
+    if (callback) callback();
+});
+document.getElementById('customConfirmCancelBtn').addEventListener('click', closeCustomConfirm);
 let currentPromptCallback = null;
 function customPrompt(message, defaultValue, callback) {
     document.getElementById('customPromptMessage').innerText = message; let inputField = document.getElementById('customPromptInput');

@@ -1,11 +1,11 @@
-const CACHE_NAME = 'pos-offline-v23';
+const CACHE_NAME = 'pos-offline-v24';
 const PRODUCT_IMAGES_CACHE = 'pos-product-images-v1';
 const urlsToCache = [
     './',
     './index.html',
     './manifest.json',
     './style.css?v=2.0',
-    './script.js?v=3.8',
+    './script.js?v=3.9',
     './convex-config.js',
     './vendor/convex.browser.bundle.js',
     './icon-192.png',

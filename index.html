@@ -227,6 +227,17 @@
         </div>
     </div>
 
+    <div id="customConfirmModal" class="modal" style="z-index: 10001;" aria-modal="true" role="dialog">
+        <div class="modal-content" style="max-width: 320px; text-align: center; border-color: #e60000;">
+            <div style="font-size: 42px; color: #e60000; margin-bottom: 10px;"><i class="fas fa-triangle-exclamation"></i></div>
+            <h3 id="customConfirmMessage" style="margin-bottom: 20px; line-height: 1.6;"></h3>
+            <div style="display: flex; gap: 10px;">
+                <button class="btn-3d btn-red" id="customConfirmYesBtn" type="button" style="flex: 1;">نعم، حذف <i class="fas fa-trash"></i></button>
+                <button class="btn-3d" id="customConfirmCancelBtn" type="button" style="flex: 1;">إلغاء <i class="fas fa-times"></i></button>
+            </div>
+        </div>
+    </div>
+
     <div id="productsAdminModal" class="modal admin-access-modal" style="z-index: 10000;">
         <div id="productsAdminCard" class="admin-access-card">
             <button class="admin-access-close" type="button" onclick="closeProductsAdminAccess()" aria-label="إغلاق"><i class="fas fa-times"></i></button>
@@ -319,6 +330,6 @@
     </script>
     <script src="./vendor/convex.browser.bundle.js"></script>
     <script src="./convex-config.js"></script>
-    <script src="script.js?v=3.8"></script>
+    <script src="script.js?v=3.9"></script>
 </body>
 </html>
