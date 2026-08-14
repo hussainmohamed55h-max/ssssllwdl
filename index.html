@@ -277,8 +277,15 @@
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
-                navigator.serviceWorker.register('./sw.js').then(registration => {
+                let refreshingForUpdate = false;
+                navigator.serviceWorker.addEventListener('controllerchange', () => {
+                    if (refreshingForUpdate) return;
+                    refreshingForUpdate = true;
+                    window.location.reload();
+                });
+                navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).then(registration => {
                     console.log('ServiceWorker registration successful');
+                    registration.update().catch(() => undefined);
                 }).catch(err => {
                     console.log('ServiceWorker registration failed: ', err);
                 });
@@ -312,6 +319,6 @@
     </script>
     <script src="./vendor/convex.browser.bundle.js"></script>
     <script src="./convex-config.js"></script>
-    <script src="script.js?v=3.7"></script>
+    <script src="script.js?v=3.8"></script>
 </body>
 </html>
