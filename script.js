@@ -1,5 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '4.0.0';
+const APP_VERSION = '4.0.1';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
@@ -243,8 +243,11 @@ async function getPendingSyncItems() {
         const transaction = idb.transaction(IDB_SYNC_QUEUE_STORE, 'readonly');
         const request = transaction.objectStore(IDB_SYNC_QUEUE_STORE).getAll();
         request.onsuccess = () => resolve((request.result || [])
-            .filter(item => ['invoice', 'product', 'category'].includes(item.type) && item.status === 'pending')
-            .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))));
+            .filter(item => ['invoice', 'product', 'category', 'customer'].includes(item.type) && item.status === 'pending')
+            .sort((a, b) => {
+                const customerPriority = Number(b.type === 'customer') - Number(a.type === 'customer');
+                return customerPriority || String(a.createdAt).localeCompare(String(b.createdAt));
+            }));
         request.onerror = () => reject(request.error);
     });
 }
