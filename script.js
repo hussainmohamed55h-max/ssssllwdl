@@ -1,4 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
+const APP_VERSION = '4.0.0';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
@@ -134,6 +135,44 @@ function createLocalId(prefix) {
         return globalThis.crypto.randomUUID();
     }
     return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function normalizeCustomerNameKey(name) {
+    return String(name || '').trim().replace(/\s+/g, ' ').toLocaleLowerCase('ar');
+}
+
+function normalizeCustomerForStorage(customer) {
+    const name = String(customer && customer.name || '').trim().replace(/\s+/g, ' ');
+    return {
+        localId: String(customer && customer.localId || createLocalId('customer')),
+        id: Number(customer && customer.id || Date.now()),
+        name,
+        nameKey: normalizeCustomerNameKey(name),
+        phone: String(customer && customer.phone || ''),
+        address: String(customer && customer.address || ''),
+        updatedAt: Number(customer && customer.updatedAt || customer && customer.id || 0),
+        ...(customer && customer.isDeleted ? { isDeleted: true } : {})
+    };
+}
+
+async function queueCustomerSyncBatch(customers, action = 'create') {
+    if (!Array.isArray(customers) || customers.length === 0) return;
+    const idb = await initIndexedDB();
+    return new Promise((resolve, reject) => {
+        const transaction = idb.transaction([IDB_STORE, IDB_SYNC_QUEUE_STORE], 'readwrite');
+        transaction.objectStore(IDB_STORE).put(
+            JSON.parse(JSON.stringify(getAppDataWithoutProducts())),
+            'pos_db_abu_amir'
+        );
+        const queueStore = transaction.objectStore(IDB_SYNC_QUEUE_STORE);
+        customers.forEach(customer => {
+            const normalized = normalizeCustomerForStorage(customer);
+            queueStore.put(createSyncQueueItem('customer', normalized.id, action, normalized));
+        });
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+    });
 }
 
 function createInvoiceLocalId() {
@@ -333,10 +372,36 @@ async function sendCategorySyncItem(client, item) {
     throw new Error(`Unsupported category sync action: ${item.action}`);
 }
 
+function normalizeCustomerForConvex(customer, isDeleted = false) {
+    const normalized = normalizeCustomerForStorage(customer);
+    return {
+        localId: normalized.localId,
+        id: normalized.id,
+        name: normalized.name,
+        nameKey: normalized.nameKey,
+        phone: normalized.phone,
+        address: normalized.address,
+        updatedAt: Number(normalized.updatedAt || Date.now()),
+        ...(isDeleted || normalized.isDeleted ? { isDeleted: true } : {})
+    };
+}
+
+async function sendCustomerSyncItem(client, item) {
+    const customerApi = convex.anyApi.customers;
+    if (!item.payload || !item.payload.localId) throw new Error('Customer sync item is missing localId');
+    const payload = normalizeCustomerForConvex(item.payload, item.action === 'delete');
+    if (item.action === 'create' || item.action === 'update') {
+        return client.mutation(customerApi.upsertCustomer, payload);
+    }
+    if (item.action === 'delete') return client.mutation(customerApi.deleteCustomer, payload);
+    throw new Error(`Unsupported customer sync action: ${item.action}`);
+}
+
 async function sendSyncQueueItem(client, item) {
     if (item.type === 'invoice') return sendInvoiceSyncItem(client, item);
     if (item.type === 'product') return sendProductSyncItem(client, item);
     if (item.type === 'category') return sendCategorySyncItem(client, item);
+    if (item.type === 'customer') return sendCustomerSyncItem(client, item);
     throw new Error(`Unsupported sync type: ${item.type}`);
 }
 
@@ -428,22 +493,99 @@ function normalizeDownloadedInvoice(invoice) {
     };
 }
 
-function addMissingCustomersFromInvoices(invoices) {
-    const knownNames = new Set(db.customers.map(customer => customer.name));
+function normalizeDownloadedCustomer(customer) {
+    return normalizeCustomerForStorage({
+        localId: customer.localId,
+        id: customer.id,
+        name: customer.name,
+        nameKey: customer.nameKey,
+        phone: customer.phone,
+        address: customer.address,
+        updatedAt: customer.updatedAt || customer._creationTime,
+        isDeleted: customer.isDeleted
+    });
+}
+
+function addMissingCustomersFromInvoices(invoices, blockedNameKeys = new Set()) {
+    const knownNames = new Set(db.customers.map(customer => normalizeCustomerNameKey(customer.name)));
     let nextCustomerId = db.customers.length
         ? Math.max(...db.customers.map(customer => Number(customer.id) || 0)) + 1
         : 1;
+    const addedCustomers = [];
     invoices.forEach(invoice => {
         const customerName = String(invoice.customer || '').trim();
-        if (!customerName || customerName === 'زبون نقدي' || knownNames.has(customerName)) return;
-        db.customers.push({
+        const customerNameKey = normalizeCustomerNameKey(customerName);
+        if (!customerName || customerName === 'زبون نقدي' || knownNames.has(customerNameKey) || blockedNameKeys.has(customerNameKey)) return;
+        const customer = normalizeCustomerForStorage({
             id: nextCustomerId++,
             name: customerName,
             phone: String(invoice.phone || ''),
-            address: ''
+            address: '',
+            updatedAt: Number(invoice.id || 0)
         });
-        knownNames.add(customerName);
+        db.customers.push(customer);
+        addedCustomers.push(customer);
+        knownNames.add(customerNameKey);
     });
+    return addedCustomers;
+}
+
+function mergeDownloadedCustomers(remoteCustomers, pendingItems) {
+    const pendingLocalIds = new Set(
+        pendingItems
+            .filter(item => item.status === 'pending' && item.type === 'customer')
+            .map(item => String(item.payload && item.payload.localId || ''))
+    );
+    const pendingNameKeys = new Set(
+        pendingItems
+            .filter(item => item.status === 'pending' && item.type === 'customer')
+            .map(item => normalizeCustomerNameKey(item.payload && item.payload.name))
+    );
+    const byLocalId = new Map(db.customers.map(customer => [customer.localId, customer]));
+    const byNameKey = new Map(db.customers.map(customer => [normalizeCustomerNameKey(customer.name), customer]));
+
+    remoteCustomers.forEach(remoteValue => {
+        if (!remoteValue || typeof remoteValue.localId !== 'string') return;
+        const remote = normalizeDownloadedCustomer(remoteValue);
+        const local = byLocalId.get(remote.localId) || byNameKey.get(remote.nameKey);
+        const hasPendingChange = Boolean(local && pendingLocalIds.has(local.localId)) || pendingNameKeys.has(remote.nameKey);
+
+        if (remote.isDeleted) {
+            if (local && !hasPendingChange && remote.updatedAt >= Number(local.updatedAt || 0)) {
+                db.customers = db.customers.filter(customer => customer !== local);
+                byLocalId.delete(local.localId);
+                byNameKey.delete(remote.nameKey);
+            }
+            return;
+        }
+
+        if (!local) {
+            if (hasPendingChange) return;
+            db.customers.push(remote);
+            byLocalId.set(remote.localId, remote);
+            byNameKey.set(remote.nameKey, remote);
+            return;
+        }
+
+        if (!hasPendingChange && remote.updatedAt >= Number(local.updatedAt || 0)) {
+            const previousLocalId = local.localId;
+            Object.assign(local, remote);
+            byLocalId.delete(previousLocalId);
+            byLocalId.set(local.localId, local);
+        } else if (local.localId !== remote.localId) {
+            byLocalId.delete(local.localId);
+            local.localId = remote.localId;
+            byLocalId.set(local.localId, local);
+        }
+    });
+
+    const newestByName = new Map();
+    db.customers.forEach(customer => {
+        const key = normalizeCustomerNameKey(customer.name);
+        const existing = newestByName.get(key);
+        if (!existing || Number(customer.updatedAt || 0) >= Number(existing.updatedAt || 0)) newestByName.set(key, customer);
+    });
+    db.customers = [...newestByName.values()];
 }
 
 async function persistDownloadedCatalog(changedProducts) {
@@ -464,10 +606,10 @@ async function persistDownloadedCatalog(changedProducts) {
     });
 }
 
-async function mergeDownloadedCatalog(remoteProducts, remoteCategories, remoteInvoices, pendingItems) {
+async function mergeDownloadedCatalog(remoteProducts, remoteCategories, remoteInvoices, remoteCustomers, pendingItems) {
     const pendingLocalIds = new Set(
         pendingItems
-            .filter(item => item.status === 'pending' && ['product', 'category', 'invoice'].includes(item.type))
+            .filter(item => item.status === 'pending' && ['product', 'category', 'invoice', 'customer'].includes(item.type))
             .map(item => `${item.type}:${item.payload && item.payload.localId}`)
     );
     const previousProducts = JSON.parse(JSON.stringify(db.products));
@@ -529,10 +671,23 @@ async function mergeDownloadedCatalog(remoteProducts, remoteCategories, remoteIn
         }
     });
 
-    addMissingCustomersFromInvoices(db.invoices);
+    mergeDownloadedCustomers(remoteCustomers, pendingItems);
+    const blockedCustomerNameKeys = new Set([
+        ...remoteCustomers
+            .filter(customer => customer && customer.isDeleted)
+            .map(customer => normalizeCustomerNameKey(customer.name)),
+        ...pendingItems
+            .filter(item => item.status === 'pending' && item.type === 'customer' && item.action === 'delete')
+            .map(item => normalizeCustomerNameKey(item.payload && item.payload.name))
+    ]);
+    const hasSharedCustomers = remoteCustomers.some(customer => customer && !customer.isDeleted);
+    const inferredCustomers = !hasSharedCustomers && db.customers.length === 0
+        ? addMissingCustomersFromInvoices(db.invoices, blockedCustomerNameKeys)
+        : [];
 
     try {
         await persistDownloadedCatalog(changedProducts);
+        await queueCustomerSyncBatch(inferredCustomers, 'create');
     } catch (error) {
         db.products = previousProducts;
         db.categories = previousCategories;
@@ -548,14 +703,15 @@ async function downloadCatalogFromConvex() {
     try {
         if (!globalThis.CONVEX_URL || !globalThis.convex || !convex.ConvexHttpClient) return false;
         const client = new convex.ConvexHttpClient(globalThis.CONVEX_URL);
-        const [remoteProducts, remoteCategories, remoteInvoices] = await Promise.all([
+        const [remoteProducts, remoteCategories, remoteInvoices, remoteCustomers] = await Promise.all([
             client.query(convex.anyApi.products.getProducts, { limit: 5000 }),
             client.query(convex.anyApi.categories.getCategories, { limit: 5000 }),
-            client.query(convex.anyApi.invoices.getInvoices, { limit: 5000 })
+            client.query(convex.anyApi.invoices.getInvoices, { limit: 5000 }),
+            client.query(convex.anyApi.customers.getCustomers, { limit: 5000 })
         ]);
-        if (!Array.isArray(remoteProducts) || !Array.isArray(remoteCategories) || !Array.isArray(remoteInvoices)) return false;
+        if (![remoteProducts, remoteCategories, remoteInvoices, remoteCustomers].every(Array.isArray)) return false;
         const pendingItems = await getPendingSyncItems();
-        await mergeDownloadedCatalog(remoteProducts, remoteCategories, remoteInvoices, pendingItems);
+        await mergeDownloadedCatalog(remoteProducts, remoteCategories, remoteInvoices, remoteCustomers, pendingItems);
         return true;
     } catch (error) {
         console.warn('تعذر تنزيل بيانات Convex، وسيستمر استخدام البيانات المحلية.', error);
@@ -578,8 +734,15 @@ async function loadAppDatabase() {
             savedDb = JSON.parse(localStorage.getItem('pos_db_abu_amir'));
         }
 
+        let customersNeedMetadata = false;
         if(savedDb) {
-            db.customers = savedDb.customers || [];
+            const savedCustomers = Array.isArray(savedDb.customers) ? savedDb.customers : [];
+            customersNeedMetadata = savedCustomers.some(customer =>
+                !customer.localId || !customer.nameKey || typeof customer.updatedAt !== 'number'
+            );
+            db.customers = savedCustomers
+                .map(normalizeCustomerForStorage)
+                .filter(customer => customer.name);
             db.cart = savedDb.cart || [];
             db.invoices = savedDb.invoices || [];
             db.posProductOrder = Array.isArray(savedDb.posProductOrder) ? savedDb.posProductOrder : [];
@@ -606,6 +769,7 @@ async function loadAppDatabase() {
         if (savedDb && (Object.prototype.hasOwnProperty.call(savedDb, 'products') || categoriesNeedMetadata)) {
             await saveToIndexedDB('pos_db_abu_amir', getAppDataWithoutProducts());
         }
+        if (customersNeedMetadata) await queueCustomerSyncBatch(db.customers, 'create');
 
         if (navigator.onLine) await downloadCatalogFromConvex();
     } catch(e) { console.error("خطأ في قراءة البيانات", e); }
@@ -650,6 +814,7 @@ function switchTab(tabId, navElement) {
     document.getElementById(tabId).classList.add('active');
     if(navElement) navElement.classList.add('active');
     if (tabId === 'tab-customers') renderCustomers();
+    if (tabId === 'tab-settings') checkForAppUpdate(true);
 }
 function triggerFlip(btn, callback) {
     btn.classList.add('flip-animate');
@@ -1506,37 +1671,73 @@ function editCustomer(id, event) {
 
 function deleteCustomer(id, event) {
     event.stopPropagation();
-    customPrompt("هل أنت متأكد من حذف هذا الزبون؟ اكتب 'نعم' للتأكيد", "", function(val) {
+    customPrompt("هل أنت متأكد من حذف هذا الزبون؟ اكتب 'نعم' للتأكيد", "", async function(val) {
         if(val === 'نعم') {
+            const customer = db.customers.find(c => c.id == id);
+            if (!customer) return;
+            const previousCustomers = JSON.parse(JSON.stringify(db.customers));
             db.customers = db.customers.filter(c => c.id != id);
-            saveLocal();
+            const deletedCustomer = normalizeCustomerForStorage({
+                ...customer,
+                updatedAt: Date.now(),
+                isDeleted: true
+            });
+            try {
+                await saveAppDataAndQueueOperation('customer', customer.id, 'delete', deletedCustomer);
+                syncChangesIfOnline();
+            } catch (error) {
+                db.customers = previousCustomers;
+                customAlert('تعذر حفظ حذف الزبون محلياً. لم يتم حذف الزبون.');
+                return;
+            }
             renderCustomers(); updateCartCustomerSelect();
             customAlert('تم حذف الزبون بنجاح!');
         }
     });
 }
 
-function saveCustomer() {
-    let name = document.getElementById('newCustName').value;
-    let phone = document.getElementById('newCustPhone').value;
-    let address = document.getElementById('newCustAddress').value;
+async function saveCustomer() {
+    let name = document.getElementById('newCustName').value.trim().replace(/\s+/g, ' ');
+    let phone = document.getElementById('newCustPhone').value.trim();
+    let address = document.getElementById('newCustAddress').value.trim();
     if(!name) { customAlert('يرجى إدخال اسم الزبون.'); return; }
-    
+    const previousCustomers = JSON.parse(JSON.stringify(db.customers));
     let editId = document.getElementById('editCustId').value;
+    let customer;
+    let action;
     if (editId) {
-        let c = db.customers.find(x => x.id == editId);
-        if (c) {
-            c.name = name;
-            c.phone = phone;
-            c.address = address;
-        }
-        customAlert('تم تعديل الزبون بنجاح!');
+        customer = db.customers.find(x => x.id == editId);
+        if (!customer) return;
+        Object.assign(customer, normalizeCustomerForStorage({
+            ...customer,
+            name,
+            phone,
+            address,
+            updatedAt: Date.now()
+        }));
+        action = 'update';
     } else {
-        db.customers.push({ id: Date.now(), name: name, phone: phone, address: address });
-        customAlert('تم حفظ الزبون بنجاح!');
+        customer = normalizeCustomerForStorage({
+            id: Date.now(),
+            name,
+            phone,
+            address,
+            updatedAt: Date.now()
+        });
+        db.customers.push(customer);
+        action = 'create';
     }
-    
-    saveLocal();
+
+    try {
+        await saveAppDataAndQueueOperation('customer', customer.id, action, customer);
+        syncChangesIfOnline();
+    } catch (error) {
+        db.customers = previousCustomers;
+        customAlert('تعذر حفظ بيانات الزبون محلياً. لم يتم فقدان البيانات السابقة.');
+        return;
+    }
+
+    customAlert(action === 'update' ? 'تم تعديل الزبون بنجاح!' : 'تم حفظ الزبون بنجاح!');
     renderCustomers(); updateCartCustomerSelect(); closeModal('addCustomerModal'); 
     document.getElementById('newCustName').value = ''; 
     document.getElementById('newCustPhone').value = '';
@@ -1576,7 +1777,7 @@ function renderCustomers() {
                 <div style="display:flex; align-items:center; gap:10px; min-width:0;">
                     <span style="flex:0 0 30px; height:30px; display:grid; place-items:center; border-radius:10px; background:var(--primary-green); color:#000; font-weight:900; box-shadow:0 4px 0 var(--green-shadow);">${index + 1}</span>
                     <div style="min-width:0;">
-                    <h3 style="margin: 0; color: var(--primary-green);"><i class="fas fa-user"></i> ${c.name}</h3>
+                    <h3 class="customer-name" style="margin: 0; color: var(--primary-green);"><i class="fas fa-user"></i> ${c.name}</h3>
                     <span style="font-size: 12px; color: var(--text-muted);">${c.phone || ''}</span>
                     ${addressText}
                     </div>
@@ -2032,17 +2233,150 @@ document.getElementById('promptConfirmBtn').addEventListener('click', function()
     let val = document.getElementById('customPromptInput').value; closeModal('customPromptModal'); if(currentPromptCallback) currentPromptCallback(val);
 });
 
+function compareAppVersions(firstVersion, secondVersion) {
+    const first = String(firstVersion || '').split('.').map(value => Number(value) || 0);
+    const second = String(secondVersion || '').split('.').map(value => Number(value) || 0);
+    const length = Math.max(first.length, second.length);
+    for (let index = 0; index < length; index++) {
+        if ((first[index] || 0) > (second[index] || 0)) return 1;
+        if ((first[index] || 0) < (second[index] || 0)) return -1;
+    }
+    return 0;
+}
+
+let latestAvailableVersion = APP_VERSION;
+let updateCheckInProgress = false;
+
+function setUpdateAvailable(version) {
+    latestAvailableVersion = version;
+    const banner = document.getElementById('appUpdateBanner');
+    const bannerVersion = document.getElementById('appUpdateBannerVersion');
+    const settingsButton = document.getElementById('settingsUpdateBtn');
+    const status = document.getElementById('appVersionStatus');
+    if (banner) banner.hidden = false;
+    if (bannerVersion) bannerVersion.textContent = `الإصدار الجديد: ${version}`;
+    if (settingsButton) settingsButton.hidden = false;
+    if (status) status.textContent = `يتوفر إصدار أحدث: ${version}`;
+}
+
+function setAppUpToDate() {
+    const banner = document.getElementById('appUpdateBanner');
+    const settingsButton = document.getElementById('settingsUpdateBtn');
+    const status = document.getElementById('appVersionStatus');
+    if (banner) banner.hidden = true;
+    if (settingsButton) settingsButton.hidden = true;
+    if (status) status.textContent = navigator.onLine ? 'النسخة محدثة.' : 'أنت تعمل دون إنترنت.';
+}
+
+async function checkForAppUpdate(silent = false) {
+    document.getElementById('currentAppVersion').textContent = `v${APP_VERSION}`;
+    const status = document.getElementById('appVersionStatus');
+    if (!navigator.onLine) {
+        if (status) status.textContent = 'يتطلب فحص التحديث اتصالاً بالإنترنت.';
+        return false;
+    }
+    if (updateCheckInProgress) return false;
+    updateCheckInProgress = true;
+    if (status && !silent) status.textContent = 'جاري فحص التحديثات…';
+    try {
+        const response = await fetch(`./version.json?check=${Date.now()}`, { cache: 'no-store' });
+        if (!response.ok) throw new Error(`Version check failed: ${response.status}`);
+        const release = await response.json();
+        const version = String(release.version || '').trim();
+        if (!version) throw new Error('Version file is invalid');
+        if (compareAppVersions(version, APP_VERSION) > 0) {
+            setUpdateAvailable(version);
+            return true;
+        }
+        latestAvailableVersion = APP_VERSION;
+        setAppUpToDate();
+        return false;
+    } catch (error) {
+        console.warn('تعذر فحص تحديث التطبيق.', error);
+        if (status) status.textContent = 'تعذر فحص التحديث الآن. حاول لاحقاً.';
+        return false;
+    } finally {
+        updateCheckInProgress = false;
+    }
+}
+
+async function applyAppUpdate() {
+    if (!navigator.onLine) {
+        customAlert('يجب الاتصال بالإنترنت لتنزيل التحديث.');
+        return;
+    }
+    const updateButtons = [
+        document.querySelector('#appUpdateBanner button'),
+        document.getElementById('settingsUpdateBtn')
+    ].filter(Boolean);
+    updateButtons.forEach(button => {
+        button.disabled = true;
+        button.textContent = 'جاري التحديث…';
+    });
+    try {
+        if ('serviceWorker' in navigator) {
+            const registration = await navigator.serviceWorker.getRegistration('./');
+            if (registration) {
+                await registration.update();
+                if (registration.waiting) registration.waiting.postMessage({ type: 'SKIP_WAITING' });
+            }
+        }
+        if ('caches' in globalThis) {
+            const cacheNames = await caches.keys();
+            await Promise.all(cacheNames
+                .filter(name => name.startsWith('pos-offline-'))
+                .map(name => caches.delete(name)));
+        }
+        const targetVersion = encodeURIComponent(latestAvailableVersion || Date.now());
+        window.location.replace(`./?updated=${targetVersion}&time=${Date.now()}`);
+    } catch (error) {
+        console.error('تعذر تطبيق تحديث التطبيق.', error);
+        updateButtons.forEach(button => { button.disabled = false; });
+        customAlert('تعذر تنزيل التحديث. تحقق من الإنترنت وحاول مرة أخرى.');
+    }
+}
+
+let sharedDataRefreshInProgress = false;
+async function refreshSharedDataFromServer() {
+    if (!navigator.onLine || sharedDataRefreshInProgress) return;
+    sharedDataRefreshInProgress = true;
+    try {
+        await syncPendingChangesToConvex();
+        const downloaded = await downloadCatalogFromConvex();
+        if (downloaded) {
+            renderCategories();
+            renderProducts();
+            renderCustomers();
+            updateCartCustomerSelect();
+        }
+    } finally {
+        sharedDataRefreshInProgress = false;
+    }
+}
+
 // التشغيل المبدئي
 loadAppDatabase().then(() => {
-    if (navigator.onLine) syncPendingChangesToConvex();
+    document.getElementById('currentAppVersion').textContent = `v${APP_VERSION}`;
+    if (navigator.onLine) refreshSharedDataFromServer();
+    checkForAppUpdate(true);
 });
 
 window.addEventListener('online', async () => {
-    const downloaded = await downloadCatalogFromConvex();
-    if (downloaded) {
-        renderCategories();
-        renderProducts();
-    }
-    syncPendingChangesToConvex();
+    await refreshSharedDataFromServer();
     cacheProductImagesForOffline();
+    checkForAppUpdate(true);
 });
+
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible' || !navigator.onLine) return;
+    refreshSharedDataFromServer();
+    checkForAppUpdate(true);
+});
+
+setInterval(() => {
+    if (document.visibilityState === 'visible' && navigator.onLine) refreshSharedDataFromServer();
+}, 60000);
+
+setInterval(() => {
+    if (document.visibilityState === 'visible' && navigator.onLine) checkForAppUpdate(true);
+}, 300000);
