@@ -11,9 +11,17 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="style.css?v=2.1">
+    <link rel="stylesheet" href="style.css?v=2.2">
 </head>
 <body class="light-mode">
+
+    <div id="appUpdateBanner" class="app-update-banner" hidden>
+        <div>
+            <strong><i class="fas fa-cloud-arrow-down"></i> يتوفر تحديث جديد</strong>
+            <span id="appUpdateBannerVersion"></span>
+        </div>
+        <button class="btn-3d" type="button" onclick="applyAppUpdate()">تحديث الآن</button>
+    </div>
 
     <main>
         <section id="tab-pos" class="tab-content active">
@@ -56,6 +64,13 @@
                 <hr style="border-color: rgba(128,128,128,0.2);">
                 <button id="lockApplicationBtn" class="btn-3d btn-red" onclick="triggerFlip(this, lockApplication)"><i class="fas fa-lock"></i> قفل التطبيق</button>
                 <button id="changeApplicationLockCodeBtn" class="btn-3d btn-red" onclick="triggerFlip(this, changeApplicationLockCode)"><i class="fas fa-key"></i> تغيير كلمة السر</button>
+                <div class="version-card">
+                    <div class="version-card-title"><i class="fas fa-code-branch"></i> إصدار النسخة</div>
+                    <strong id="currentAppVersion">—</strong>
+                    <span id="appVersionStatus">جاري فحص التحديثات…</span>
+                    <button id="settingsUpdateBtn" class="btn-3d" type="button" onclick="applyAppUpdate()" hidden><i class="fas fa-cloud-arrow-down"></i> تحديث الآن</button>
+                    <button id="checkUpdateBtn" class="btn-3d btn-blue" type="button" onclick="checkForAppUpdate()"><i class="fas fa-rotate"></i> فحص التحديث</button>
+                </div>
             </div>
         </section>
     </main>
@@ -288,12 +303,6 @@
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
-                let refreshingForUpdate = false;
-                navigator.serviceWorker.addEventListener('controllerchange', () => {
-                    if (refreshingForUpdate) return;
-                    refreshingForUpdate = true;
-                    window.location.reload();
-                });
                 navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).then(registration => {
                     console.log('ServiceWorker registration successful');
                     registration.update().catch(() => undefined);
@@ -330,6 +339,6 @@
     </script>
     <script src="./vendor/convex.browser.bundle.js"></script>
     <script src="./convex-config.js"></script>
-    <script src="script.js?v=3.9"></script>
+    <script src="script.js?v=4.0"></script>
 </body>
 </html>

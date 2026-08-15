@@ -53,8 +53,22 @@ export const categoryFields = {
   updatedAt: v.optional(v.number()),
 };
 
+export const customerFields = {
+  localId: v.string(),
+  id: v.number(),
+  name: v.string(),
+  nameKey: v.string(),
+  phone: v.string(),
+  address: v.string(),
+  updatedAt: v.number(),
+  isDeleted: v.optional(v.boolean()),
+};
+
 export default defineSchema({
   invoices: defineTable(invoiceFields).index("by_localId", ["localId"]),
   products: defineTable(productFields).index("by_localId", ["localId"]),
   categories: defineTable(categoryFields).index("by_localId", ["localId"]),
+  customers: defineTable(customerFields)
+    .index("by_localId", ["localId"])
+    .index("by_nameKey", ["nameKey"]),
 });

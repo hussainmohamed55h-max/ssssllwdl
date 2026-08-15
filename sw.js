@@ -1,11 +1,12 @@
-const CACHE_NAME = 'pos-offline-v25';
+const CACHE_NAME = 'pos-offline-v26';
 const PRODUCT_IMAGES_CACHE = 'pos-product-images-v1';
 const urlsToCache = [
     './',
     './index.html',
     './manifest.json',
-    './style.css?v=2.1',
-    './script.js?v=3.9',
+    './style.css?v=2.2',
+    './script.js?v=4.0',
+    './version.json',
     './convex-config.js',
     './vendor/convex.browser.bundle.js',
     './icon-192.png',
@@ -52,6 +53,10 @@ async function cacheProductImages(urls) {
 }
 
 self.addEventListener('message', event => {
+    if (event.data && event.data.type === 'SKIP_WAITING') {
+        self.skipWaiting();
+        return;
+    }
     if (event.data && event.data.type === 'CACHE_PRODUCT_IMAGES') {
         event.waitUntil(cacheProductImages(event.data.urls));
     }
@@ -96,6 +101,15 @@ async function getCachedProductImage(request) {
 }
 
 self.addEventListener('fetch', event => {
+    const requestUrl = new URL(event.request.url);
+    if (event.request.method === 'GET' && requestUrl.pathname.endsWith('/version.json')) {
+        event.respondWith(
+            fetch(new Request(event.request, { cache: 'no-store' }))
+                .catch(() => caches.match('./version.json'))
+        );
+        return;
+    }
+
     if (isRemoteProductImage(event.request)) {
         event.respondWith(getCachedProductImage(event.request));
         return;
