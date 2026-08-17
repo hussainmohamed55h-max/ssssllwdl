@@ -11,7 +11,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="style.css?v=2.3">
+    <link rel="stylesheet" href="style.css?v=2.2">
 </head>
 <body class="light-mode">
 
@@ -40,11 +40,6 @@
         </section>
 
         <section id="tab-products" class="tab-content">
-            <div class="admin-section-tabs" role="tablist" aria-label="أقسام الإدارة">
-                <button id="adminProductsTabBtn" class="btn-3d admin-section-tab active" type="button" onclick="showAdminPanel('products')"><i class="fas fa-boxes-stacked"></i> المنتجات</button>
-                <button id="adminMediaTabBtn" class="btn-3d btn-blue admin-section-tab" type="button" onclick="showAdminPanel('media')"><i class="fas fa-images"></i> صور الإدارة</button>
-            </div>
-            <div id="adminProductsPanel">
             <div style="display: flex; gap: 10px; margin-bottom: 20px;">
                 <button class="btn-3d" onclick="triggerFlip(this, openAddProductModal)"><i class="fas fa-plus"></i> إضافة منتج</button>
                 <button class="btn-3d btn-blue" onclick="triggerFlip(this, () => openModal('categoryModal'))"><i class="fas fa-folder-plus"></i> إدارة الفئات</button>
@@ -52,14 +47,6 @@
             <h3 style="margin-bottom: 10px;">المنتجات الحالية:</h3>
             <div class="grid-3" id="admin-products-grid">
                 </div>
-            </div>
-            <div id="adminMediaPanel" class="admin-media-panel" hidden>
-                <div class="admin-media-heading">
-                    <i class="fas fa-wand-magic-sparkles"></i>
-                    <div><h2>صور الإدارة</h2><p>ارفع WebM VP9 Alpha الشفاف أو PNG / WebP. تُحفظ الصورة وتظهر على جميع الأجهزة.</p></div>
-                </div>
-                <div id="adminMediaGrid" class="admin-media-grid"></div>
-            </div>
         </section>
 
         <section id="tab-customers" class="tab-content">
@@ -352,6 +339,6 @@
     </script>
     <script src="./vendor/convex.browser.bundle.js"></script>
     <script src="./convex-config.js"></script>
-    <script src="script.js?v=4.1.0"></script>
+    <script src="script.js?v=4.1.1"></script>
 </body>
 </html>

@@ -1,12 +1,11 @@
-const CACHE_NAME = 'pos-offline-v28';
+const CACHE_NAME = 'pos-offline-v29';
 const PRODUCT_IMAGES_CACHE = 'pos-product-images-v1';
-const ADMIN_MEDIA_CACHE = 'pos-admin-media-v1';
 const urlsToCache = [
     './',
     './index.html',
     './manifest.json',
-    './style.css?v=2.3',
-    './script.js?v=4.1.0',
+    './style.css?v=2.2',
+    './script.js?v=4.1.1',
     './version.json',
     './convex-config.js',
     './vendor/convex.browser.bundle.js',
@@ -53,23 +52,6 @@ async function cacheProductImages(urls) {
     await Promise.all(Array.from({ length: workerCount }, () => cacheNextImage()));
 }
 
-async function cacheAdminMedia(urls) {
-    const mediaCache = await caches.open(ADMIN_MEDIA_CACHE);
-    const uniqueUrls = [...new Set((Array.isArray(urls) ? urls : []).filter(url =>
-        typeof url === 'string' && /^https:\/\//i.test(url)
-    ))];
-    await Promise.all(uniqueUrls.map(async url => {
-        try {
-            if (await mediaCache.match(url)) return;
-            const request = new Request(url, { mode: 'cors', credentials: 'omit' });
-            const response = await fetch(request);
-            if (response && response.ok) await mediaCache.put(request, response.clone());
-        } catch (error) {
-            // ستتم إعادة المحاولة عند عودة الاتصال.
-        }
-    }));
-}
-
 self.addEventListener('message', event => {
     if (event.data && event.data.type === 'SKIP_WAITING') {
         self.skipWaiting();
@@ -78,9 +60,6 @@ self.addEventListener('message', event => {
     if (event.data && event.data.type === 'CACHE_PRODUCT_IMAGES') {
         event.waitUntil(cacheProductImages(event.data.urls));
     }
-    if (event.data && event.data.type === 'CACHE_ADMIN_MEDIA') {
-        event.waitUntil(cacheAdminMedia(event.data.urls));
-    }
 });
 
 function isRemoteProductImage(request) {
@@ -88,25 +67,6 @@ function isRemoteProductImage(request) {
     const hostname = new URL(request.url).hostname;
     return hostname === 'i.ibb.co' || hostname.endsWith('.i.ibb.co') ||
         hostname.endsWith('.convex.cloud') || hostname.endsWith('.convex.site');
-}
-
-function isRemoteAdminMedia(request) {
-    if (request.method !== 'GET' || request.destination !== 'video') return false;
-    const hostname = new URL(request.url).hostname;
-    return hostname.endsWith('.convex.cloud') || hostname.endsWith('.convex.site');
-}
-
-async function getCachedAdminMedia(request) {
-    const mediaCache = await caches.open(ADMIN_MEDIA_CACHE);
-    const cached = await mediaCache.match(request.url);
-    if (cached) return cached;
-    try {
-        const response = await fetch(request);
-        if (response && response.ok && !request.headers.has('range')) await mediaCache.put(request.url, response.clone());
-        return response;
-    } catch (error) {
-        return new Response('', { status: 503, statusText: 'Offline media unavailable' });
-    }
 }
 
 function createOfflineImagePlaceholder() {
@@ -125,9 +85,6 @@ function createOfflineImagePlaceholder() {
 }
 
 async function getCachedProductImage(request) {
-    const adminMediaCache = await caches.open(ADMIN_MEDIA_CACHE);
-    const cachedAdminMedia = await adminMediaCache.match(request.url);
-    if (cachedAdminMedia) return cachedAdminMedia;
     const imageCache = await caches.open(PRODUCT_IMAGES_CACHE);
     const cachedImage = await imageCache.match(request);
     if (cachedImage) return cachedImage;
@@ -150,11 +107,6 @@ self.addEventListener('fetch', event => {
             fetch(new Request(event.request, { cache: 'no-store' }))
                 .catch(() => caches.match('./version.json'))
         );
-        return;
-    }
-
-    if (isRemoteAdminMedia(event.request)) {
-        event.respondWith(getCachedAdminMedia(event.request));
         return;
     }
 
@@ -205,7 +157,7 @@ self.addEventListener('fetch', event => {
 });
 
 self.addEventListener('activate', event => {
-    const cacheWhitelist = [CACHE_NAME, PRODUCT_IMAGES_CACHE, ADMIN_MEDIA_CACHE];
+    const cacheWhitelist = [CACHE_NAME, PRODUCT_IMAGES_CACHE];
     event.waitUntil(
         caches.keys().then(cacheNames => {
             return Promise.all(
