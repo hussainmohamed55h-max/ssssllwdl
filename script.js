@@ -1,5 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '4.1.0';
+const APP_VERSION = '4.0.1';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
@@ -714,10 +714,7 @@ async function downloadCatalogFromConvex() {
         ]);
         if (![remoteProducts, remoteCategories, remoteInvoices, remoteCustomers].every(Array.isArray)) return false;
         const pendingItems = await getPendingSyncItems();
-        const catalogProducts = remoteProducts.filter(product =>
-            !String(product && product.localId || '').startsWith('admin-media:')
-        );
-        await mergeDownloadedCatalog(catalogProducts, remoteCategories, remoteInvoices, remoteCustomers, pendingItems);
+        await mergeDownloadedCatalog(remoteProducts, remoteCategories, remoteInvoices, remoteCustomers, pendingItems);
         return true;
     } catch (error) {
         console.warn('تعذر تنزيل بيانات Convex، وسيستمر استخدام البيانات المحلية.', error);
@@ -821,273 +818,6 @@ function switchTab(tabId, navElement) {
     if(navElement) navElement.classList.add('active');
     if (tabId === 'tab-customers') renderCustomers();
     if (tabId === 'tab-settings') checkForAppUpdate(true);
-    if (tabId === 'tab-products') showAdminPanel('products');
-}
-
-const ADMIN_MEDIA_CACHE_KEY = 'pos_admin_media_v1';
-const ADMIN_MEDIA_PRODUCT_PREFIX = 'admin-media:';
-const ADMIN_MEDIA_ROLES = [
-    { role: 'admin', label: 'الأدمن', icon: 'fa-user-shield', color: '#31f06f' },
-    { role: 'manager', label: 'المدير', icon: 'fa-user-tie', color: '#22a7ff' },
-    { role: 'vip', label: 'العضو المميز', icon: 'fa-crown', color: '#ffd43b' }
-];
-let adminMediaItems = [];
-let adminMediaLoading = false;
-
-function loadCachedAdminMedia() {
-    try {
-        const cached = JSON.parse(localStorage.getItem(ADMIN_MEDIA_CACHE_KEY) || '[]');
-        adminMediaItems = Array.isArray(cached) ? cached : [];
-    } catch (error) {
-        adminMediaItems = [];
-    }
-}
-
-function saveCachedAdminMedia() {
-    localStorage.setItem(ADMIN_MEDIA_CACHE_KEY, JSON.stringify(adminMediaItems));
-}
-
-function getAdminMedia(role) {
-    return adminMediaItems.find(item => item.role === role && item.mediaUrl) || null;
-}
-
-function createAdminMediaPreview(item, definition) {
-    const frame = document.createElement('div');
-    frame.className = 'admin-logo-frame';
-    frame.style.setProperty('--role-color', definition.color);
-    if (!item) {
-        frame.innerHTML = `<div class="admin-logo-empty"><i class="fas ${definition.icon}"></i><span>لم تُرفع صورة بعد</span></div>`;
-        return frame;
-    }
-
-    const isVideo = String(item.mediaType || '').includes('webm') || /\.webm(?:$|\?)/i.test(item.fileName || item.mediaUrl);
-    const media = document.createElement(isVideo ? 'video' : 'img');
-    media.className = 'admin-logo-media';
-    media.src = item.mediaUrl;
-    media.setAttribute('aria-label', `شعار ${definition.label}`);
-    if (isVideo) {
-        media.autoplay = true;
-        media.loop = true;
-        media.muted = true;
-        media.playsInline = true;
-        media.setAttribute('playsinline', '');
-        media.addEventListener('canplay', () => media.play().catch(() => undefined), { once: true });
-    }
-    media.addEventListener('error', () => frame.classList.add('media-load-error'));
-    frame.append(media);
-    const shine = document.createElement('span');
-    shine.className = 'admin-logo-shine';
-    frame.append(shine);
-    return frame;
-}
-
-function renderAdminMedia() {
-    const grid = document.getElementById('adminMediaGrid');
-    if (!grid) return;
-    grid.innerHTML = '';
-    ADMIN_MEDIA_ROLES.forEach(definition => {
-        const item = getAdminMedia(definition.role);
-        const card = document.createElement('article');
-        card.className = 'admin-media-card';
-        card.style.setProperty('--role-color', definition.color);
-        card.append(createAdminMediaPreview(item, definition));
-
-        const title = document.createElement('h3');
-        title.innerHTML = `<i class="fas ${definition.icon}"></i> ${definition.label}`;
-        card.append(title);
-
-        const details = document.createElement('p');
-        details.className = 'admin-media-file-name';
-        details.textContent = item ? item.fileName : 'WebM شفاف، PNG أو WebP';
-        card.append(details);
-
-        const status = document.createElement('div');
-        status.id = `adminMediaStatus-${definition.role}`;
-        status.className = 'admin-media-status';
-        status.textContent = item ? 'محفوظ ومتزامن' : 'بانتظار اختيار الملف';
-        card.append(status);
-
-        const input = document.createElement('input');
-        input.id = `adminMediaInput-${definition.role}`;
-        input.type = 'file';
-        input.accept = '.webm,video/webm,.png,image/png,.webp,image/webp';
-        input.hidden = true;
-        input.addEventListener('change', () => uploadAdminMedia(definition.role, input));
-        card.append(input);
-
-        const actions = document.createElement('div');
-        actions.className = 'admin-media-actions';
-        const uploadButton = document.createElement('button');
-        uploadButton.type = 'button';
-        uploadButton.className = 'btn-3d';
-        uploadButton.innerHTML = `<i class="fas fa-cloud-arrow-up"></i> ${item ? 'تغيير الصورة' : 'رفع صورة'}`;
-        uploadButton.addEventListener('click', () => { input.value = ''; input.click(); });
-        actions.append(uploadButton);
-        if (item) {
-            const removeButton = document.createElement('button');
-            removeButton.type = 'button';
-            removeButton.className = 'btn-3d btn-red admin-media-remove';
-            removeButton.setAttribute('aria-label', `حذف شعار ${definition.label}`);
-            removeButton.innerHTML = '<i class="fas fa-trash"></i>';
-            removeButton.addEventListener('click', () => customConfirm(`هل تريد حذف شعار ${definition.label}؟`, () => removeAdminMedia(definition.role)));
-            actions.append(removeButton);
-        }
-        card.append(actions);
-        grid.append(card);
-    });
-    cacheAdminMediaForOffline();
-}
-
-function showAdminPanel(panelName) {
-    const showMedia = panelName === 'media';
-    document.getElementById('adminProductsPanel').hidden = showMedia;
-    document.getElementById('adminMediaPanel').hidden = !showMedia;
-    document.getElementById('adminProductsTabBtn').classList.toggle('active', !showMedia);
-    document.getElementById('adminMediaTabBtn').classList.toggle('active', showMedia);
-    if (showMedia) {
-        renderAdminMedia();
-        refreshAdminMediaFromServer();
-    }
-}
-
-async function refreshAdminMediaFromServer() {
-    if (!navigator.onLine || adminMediaLoading || !globalThis.CONVEX_URL || !globalThis.convex) return false;
-    adminMediaLoading = true;
-    try {
-        const client = new convex.ConvexHttpClient(globalThis.CONVEX_URL);
-        const remoteProducts = await client.query(convex.anyApi.products.getProducts, { limit: 5000 });
-        if (!Array.isArray(remoteProducts)) return false;
-        adminMediaItems = remoteProducts
-            .filter(product => String(product.localId || '').startsWith(ADMIN_MEDIA_PRODUCT_PREFIX))
-            .map(product => ({
-                role: String(product.localId).slice(ADMIN_MEDIA_PRODUCT_PREFIX.length),
-                storageId: product.storageId || '',
-                mediaType: product.imageId || '',
-                fileName: product.thumbUrl || 'ملف الإدارة',
-                updatedAt: Number(product.updatedAt || 0),
-                mediaUrl: product.imageUrl || ''
-            }))
-            .filter(item => item.mediaUrl && ADMIN_MEDIA_ROLES.some(definition => definition.role === item.role));
-        saveCachedAdminMedia();
-        renderAdminMedia();
-        return true;
-    } catch (error) {
-        console.warn('تعذر تحديث صور الإدارة، وسيتم عرض النسخة المحفوظة.', error);
-        return false;
-    } finally {
-        adminMediaLoading = false;
-    }
-}
-
-async function uploadAdminMedia(role, input) {
-    const file = input.files && input.files[0];
-    if (!file) return;
-    const status = document.getElementById(`adminMediaStatus-${role}`);
-    const allowedTypes = ['video/webm', 'image/png', 'image/webp'];
-    const extensionAllowed = /\.(webm|png|webp)$/i.test(file.name);
-    if ((!allowedTypes.includes(file.type) && !extensionAllowed) || file.size > 40 * 1024 * 1024) {
-        customAlert('اختر ملف WebM أو PNG أو WebP بحجم لا يتجاوز 40 ميغابايت.');
-        input.value = '';
-        return;
-    }
-    if (!navigator.onLine) {
-        customAlert('رفع صور الإدارة يحتاج اتصالاً بالإنترنت.');
-        return;
-    }
-
-    let storageId = '';
-    input.disabled = true;
-    if (status) status.textContent = 'جاري رفع الملف…';
-    try {
-        const client = new convex.ConvexHttpClient(globalThis.CONVEX_URL);
-        const filesApi = convex.anyApi.files;
-        const productsApi = convex.anyApi.products;
-        const uploadUrl = await client.mutation(filesApi.generateProductImageUploadUrl, {});
-        const response = await fetch(uploadUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': file.type || 'application/octet-stream' },
-            body: file
-        });
-        if (!response.ok) throw new Error(`تعذر الرفع (${response.status})`);
-        const uploaded = await response.json();
-        storageId = String(uploaded.storageId || '');
-        if (!storageId) throw new Error('لم يرجع التخزين معرّف الملف.');
-        if (status) status.textContent = 'جاري حفظ الشعار…';
-        const mediaUrl = await client.query(filesApi.getProductImageUrl, { storageId });
-        if (!mediaUrl) throw new Error('تعذر الحصول على رابط الملف.');
-        const localId = `${ADMIN_MEDIA_PRODUCT_PREFIX}${role}`;
-        const existingProducts = await client.query(productsApi.getProducts, { limit: 5000 });
-        const existing = existingProducts.find(product => product.localId === localId);
-        const payload = {
-            localId,
-            id: existing ? Number(existing.id) : Date.now(),
-            name: `__ADMIN_MEDIA__:${role}`,
-            price: 0,
-            category: '__admin_media__',
-            imageUrl: mediaUrl,
-            imageId: file.type || (file.name.toLowerCase().endsWith('.webm') ? 'video/webm' : 'image/webp'),
-            storageId,
-            thumbUrl: file.name.slice(0, 180),
-            mediumUrl: '',
-            deleteUrl: '',
-            isHidden: true,
-            updatedAt: Date.now()
-        };
-        await client.mutation(existing ? productsApi.updateProduct : productsApi.createProduct, payload);
-        adminMediaItems = adminMediaItems.filter(item => item.role !== role);
-        adminMediaItems.push({
-            role,
-            storageId,
-            mediaType: payload.imageId,
-            fileName: payload.thumbUrl,
-            updatedAt: payload.updatedAt,
-            mediaUrl
-        });
-        saveCachedAdminMedia();
-        renderAdminMedia();
-        customAlert('تم حفظ شعار الإدارة ومزامنته مع جميع الأجهزة.');
-    } catch (error) {
-        console.error('تعذر رفع صورة الإدارة.', error);
-        if (storageId) {
-            const client = new convex.ConvexHttpClient(globalThis.CONVEX_URL);
-            client.mutation(convex.anyApi.files.deleteUnusedProductImage, { storageId }).catch(() => undefined);
-        }
-        if (status) status.textContent = 'فشل الرفع، حاول مرة أخرى';
-        customAlert(`فشل رفع الملف: ${error.message}`);
-    } finally {
-        input.disabled = false;
-        input.value = '';
-    }
-}
-
-async function removeAdminMedia(role) {
-    if (!navigator.onLine) {
-        customAlert('حذف الشعار يحتاج اتصالاً بالإنترنت.');
-        return;
-    }
-    try {
-        const client = new convex.ConvexHttpClient(globalThis.CONVEX_URL);
-        await client.mutation(convex.anyApi.products.deleteProduct, { localId: `${ADMIN_MEDIA_PRODUCT_PREFIX}${role}` });
-        adminMediaItems = adminMediaItems.filter(item => item.role !== role);
-        saveCachedAdminMedia();
-        renderAdminMedia();
-        customAlert('تم حذف الشعار.');
-    } catch (error) {
-        customAlert('تعذر حذف الشعار الآن.');
-    }
-}
-
-let lastAdminMediaCacheSignature = '';
-function cacheAdminMediaForOffline() {
-    if (!navigator.onLine || !('serviceWorker' in navigator)) return;
-    const urls = adminMediaItems.map(item => item.mediaUrl).filter(Boolean);
-    const signature = urls.join('|');
-    if (!signature || signature === lastAdminMediaCacheSignature) return;
-    navigator.serviceWorker.ready.then(registration => {
-        const worker = registration.active || navigator.serviceWorker.controller;
-        if (worker) worker.postMessage({ type: 'CACHE_ADMIN_MEDIA', urls });
-        lastAdminMediaCacheSignature = signature;
-    }).catch(() => undefined);
 }
 function triggerFlip(btn, callback) {
     btn.classList.add('flip-animate');
@@ -2628,20 +2358,15 @@ async function refreshSharedDataFromServer() {
 }
 
 // التشغيل المبدئي
-loadCachedAdminMedia();
-renderAdminMedia();
 loadAppDatabase().then(() => {
     document.getElementById('currentAppVersion').textContent = `v${APP_VERSION}`;
     if (navigator.onLine) refreshSharedDataFromServer();
-    if (navigator.onLine) refreshAdminMediaFromServer();
     checkForAppUpdate(true);
 });
 
 window.addEventListener('online', async () => {
     await refreshSharedDataFromServer();
-    await refreshAdminMediaFromServer();
     cacheProductImagesForOffline();
-    cacheAdminMediaForOffline();
     checkForAppUpdate(true);
 });
 
