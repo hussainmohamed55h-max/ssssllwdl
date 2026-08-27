@@ -39,6 +39,12 @@ body { background-color: var(--bg-dark); color: var(--text-light); padding-botto
 .admin-product-card { transition:transform .15s ease,opacity .15s ease,box-shadow .15s ease; }
 .admin-product-card.admin-product-dragging { opacity:.76; transform:scale(1.025); border:2px dashed var(--primary-green); box-shadow:0 16px 30px rgba(0,0,0,.28); z-index:20; }
 body.admin-product-reordering { user-select:none; overscroll-behavior:none; }
+.product-half-carton-option { display:flex; align-items:center; gap:12px; margin:12px 0 16px; padding:12px; border:1px solid var(--border-color); border-radius:12px; background:var(--input-bg); cursor:pointer; }
+.product-half-carton-option input { width:22px; height:22px; flex:0 0 auto; accent-color:var(--primary-green); }
+.product-half-carton-option span { display:flex; flex-direction:column; gap:3px; text-align:right; }
+.product-half-carton-option strong { color:var(--text-light); font-size:14px; }
+.product-half-carton-option small { color:var(--text-muted); font-size:11px; line-height:1.5; }
+.half-carton-badge { width:max-content; max-width:100%; margin:3px 0 6px; padding:3px 7px; border-radius:8px; color:var(--primary-green); background:color-mix(in srgb,var(--primary-green) 12%,var(--input-bg)); border:1px solid color-mix(in srgb,var(--primary-green) 45%,var(--border-color)); font-size:10px; font-weight:800; }
 
 .app-update-banner { position: fixed; top: max(10px, env(safe-area-inset-top)); left: 12px; right: 12px; z-index: 20000; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-radius: 16px; color: #061306; background: linear-gradient(145deg, #7dff69, var(--primary-green)); box-shadow: 0 7px 0 var(--green-shadow), 0 16px 32px rgba(0,0,0,.35); }
 .app-update-banner[hidden] { display: none; }
