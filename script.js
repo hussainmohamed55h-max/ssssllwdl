@@ -1,5 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '4.1.1';
+const APP_VERSION = '4.1.2';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
@@ -1610,21 +1610,7 @@ function renderProducts() {
     orderedPosProducts.forEach(p => {
         if (!p.isHidden && (activeCategoryFilter === 'الكل' || p.category === activeCategoryFilter)) {
             let catBadge = p.category ? `<div style="font-size:11px; color:var(--text-muted); margin-bottom:5px;">${p.category}</div>` : '';
-            let cartItem = db.cart.find(c => c.id == p.id);
-            let posActionHtml = '';
-            
-            if(cartItem) {
-                posActionHtml = `
-                <div style="font-size: 12px; color: var(--primary-green); margin-top: 5px; font-weight: bold;">الإجمالي: ${(p.price * cartItem.qty).toLocaleString()} د.ع</div>
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 5px; gap: 5px;">
-                    <button class="btn-3d btn-red" style="width: 40px; padding: 5px;" onclick="changeQtyById(${p.id}, -0.5)">-</button>
-                    <span style="font-weight: bold; font-size: 18px; cursor: pointer; border-bottom: 1px dashed var(--primary-green);" onclick="editQtyById(${p.id})">${cartItem.qty}</span>
-                    <button class="btn-3d btn-blue" style="width: 40px; padding: 5px;" onclick="changeQtyById(${p.id}, 0.5)">+</button>
-                </div>
-                <input type="text" placeholder="ملاحظة (اختياري)..." value="${cartItem.note || ''}" onchange="updateItemNote(${p.id}, this.value)" style="width: 100%; margin-top: 8px; padding: 6px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--input-bg); color: var(--text-light); text-align: center; font-size: 12px; outline: none; transition: 0.3s;" onfocus="this.style.borderColor='var(--primary-green)'" onblur="this.style.borderColor='var(--border-color)'">`;
-            } else {
-                posActionHtml = `<button class="btn-3d btn-green" style="margin-top: 10px; width: 100%;" onclick="triggerFlip(this, () => addToCart(${p.id}))"><i class="fas fa-cart-plus"></i> أضف للسلة</button>`;
-            }
+            let posActionHtml = getProductCartActionsHtml(p);
 
             posGridHtml += `
                 <div class="card pos-product-card" data-product-id="${p.id}" style="position:relative; display:flex; flex-direction:column; justify-content:space-between; padding:8px;">
@@ -1634,7 +1620,7 @@ function renderProducts() {
                         <div style="pointer-events: none;">${catBadge}</div>
                         <div class="price" style="pointer-events: none; font-size: 13px; margin-bottom: 6px;">${p.price.toLocaleString()} د.ع</div>
                     </div>
-                    <div>${posActionHtml}</div>
+                    <div class="product-cart-actions">${posActionHtml}</div>
                 </div>`;
         }
     });
@@ -1646,6 +1632,29 @@ function renderProducts() {
     posGrid.innerHTML = posGridHtml;
     adminGrid.innerHTML = adminGridHtml;
     cacheProductImagesForOffline();
+}
+
+function getProductCartActionsHtml(product) {
+    const cartItem = db.cart.find(item => item.id == product.id);
+    if (!cartItem) {
+        return `<button class="btn-3d btn-green" style="margin-top: 10px; width: 100%;" onclick="triggerFlip(this, () => addToCart(${product.id}))"><i class="fas fa-cart-plus"></i> أضف للسلة</button>`;
+    }
+    return `
+        <div style="font-size: 12px; color: var(--primary-green); margin-top: 5px; font-weight: bold;">الإجمالي: ${(cartItem.price * cartItem.qty).toLocaleString()} د.ع</div>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 5px; gap: 5px;">
+            <button class="btn-3d btn-red" style="width: 40px; padding: 5px;" onclick="changeQtyById(${product.id}, -0.5)">-</button>
+            <span style="font-weight: bold; font-size: 18px; cursor: pointer; border-bottom: 1px dashed var(--primary-green);" onclick="editQtyById(${product.id})">${cartItem.qty}</span>
+            <button class="btn-3d btn-blue" style="width: 40px; padding: 5px;" onclick="changeQtyById(${product.id}, 0.5)">+</button>
+        </div>
+        <input type="text" placeholder="ملاحظة (اختياري)..." value="${cartItem.note || ''}" onchange="updateItemNote(${product.id}, this.value)" style="width: 100%; margin-top: 8px; padding: 6px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--input-bg); color: var(--text-light); text-align: center; font-size: 12px; outline: none; transition: 0.3s;" onfocus="this.style.borderColor='var(--primary-green)'" onblur="this.style.borderColor='var(--border-color)'">`;
+}
+
+function refreshProductCartActions() {
+    document.querySelectorAll('.pos-product-card').forEach(card => {
+        const product = db.products.find(item => String(item.id) === String(card.dataset.productId));
+        const actions = card.querySelector('.product-cart-actions');
+        if (product && actions) actions.innerHTML = getProductCartActionsHtml(product);
+    });
 }
 
 // ==========================================
@@ -1811,7 +1820,6 @@ function addToCart(productId) {
     if(existing) { existing.qty++; } else { db.cart.push({ ...product, qty: 1 }); }
     saveLocal();
     updateCartUI();
-    renderProducts();
 }
 
 function changeQtyById(productId, change) {
@@ -1849,8 +1857,7 @@ function editQtyById(productId) {
                     db.cart.splice(index, 1);
                 }
                 saveLocal();
-                updateCartUI(); 
-                renderProducts();
+                updateCartUI();
             }
         });
     }
@@ -1889,19 +1896,18 @@ function updateCartUI() {
     });
     
     container.innerHTML = cartHtml;
-    renderProducts();
+    refreshProductCartActions();
 }
 
-function changeQty(index, change) { db.cart[index].qty += change; if(db.cart[index].qty <= 0) db.cart.splice(index, 1); saveLocal(); updateCartUI(); renderProducts(); }
-function removeFromCart(index) { db.cart.splice(index, 1); saveLocal(); updateCartUI(); renderProducts(); }
+function changeQty(index, change) { db.cart[index].qty += change; if(db.cart[index].qty <= 0) db.cart.splice(index, 1); saveLocal(); updateCartUI(); }
+function removeFromCart(index) { db.cart.splice(index, 1); saveLocal(); updateCartUI(); }
 function editPrice(index) {
     customPrompt("أدخل السعر الجديد لـ " + db.cart[index].name + ":", db.cart[index].price, function(newPrice) {
         let parsedPrice = parseArabicLocaleNumber(newPrice);
         if(!isNaN(parsedPrice) && parsedPrice >= 0) { 
             db.cart[index].price = parsedPrice; 
             saveLocal(); 
-            updateCartUI(); 
-            renderProducts();
+            updateCartUI();
         }
     });
 }
