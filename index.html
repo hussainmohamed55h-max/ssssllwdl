@@ -11,7 +11,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="style.css?v=2.3">
+    <link rel="stylesheet" href="style.css?v=2.4">
 </head>
 <body class="light-mode">
 
@@ -123,6 +123,14 @@
                     <option value="">اختر الفئة...</option>
                 </select>
             </div>
+
+            <label class="product-half-carton-option" for="newProdAllowHalfCarton">
+                <input type="checkbox" id="newProdAllowHalfCarton">
+                <span>
+                    <strong>بيع نصف كارتون</strong>
+                    <small>عند تفعيله تبدأ الكمية من 0.5 وتزداد أو تنقص نصفاً.</small>
+                </span>
+            </label>
 
             <button id="saveProductBtn" class="btn-3d" onclick="triggerFlip(this, saveProduct)">حفظ المنتج <i class="fas fa-save"></i></button>
         </div>
@@ -339,6 +347,6 @@
     </script>
     <script src="./vendor/convex.browser.bundle.js"></script>
     <script src="./convex-config.js"></script>
-    <script src="script.js?v=4.2.0"></script>
+    <script src="script.js?v=4.3.0"></script>
 </body>
 </html>
