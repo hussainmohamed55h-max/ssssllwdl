@@ -1,5 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '4.1.2';
+const APP_VERSION = '4.2.0';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
@@ -1534,6 +1534,95 @@ function getOrderedPosProducts() {
     });
 }
 
+let adminProductDragState = null;
+
+function applyProductOrderToSalesGrid() {
+    const posGrid = document.getElementById('pos-products-grid');
+    if (!posGrid) return;
+    const cardsById = new Map(
+        [...posGrid.querySelectorAll('.pos-product-card')].map(card => [String(card.dataset.productId), card])
+    );
+    getOrderedPosProducts().forEach(product => {
+        const card = cardsById.get(String(product.id));
+        if (card) posGrid.appendChild(card);
+    });
+}
+
+function saveAdminProductOrder() {
+    const adminGrid = document.getElementById('admin-products-grid');
+    if (!adminGrid) return;
+    const orderedIds = [...adminGrid.querySelectorAll('.admin-product-card')]
+        .map(card => String(card.dataset.productId));
+    const orderedSet = new Set(orderedIds);
+    const missingIds = getOrderedPosProducts()
+        .map(product => String(product.id))
+        .filter(id => !orderedSet.has(id));
+    db.posProductOrder = [...orderedIds, ...missingIds];
+    saveLocal();
+    applyProductOrderToSalesGrid();
+}
+
+function moveAdminProductCard(event) {
+    if (!adminProductDragState || event.pointerId !== adminProductDragState.pointerId) return;
+    event.preventDefault();
+
+    if (event.clientY < 100) window.scrollBy(0, -20);
+    if (event.clientY > window.innerHeight - 110) window.scrollBy(0, 20);
+
+    const dragged = adminProductDragState.card;
+    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest('.admin-product-card');
+    if (!target || target === dragged || target.parentElement !== dragged.parentElement) return;
+
+    const cards = [...dragged.parentElement.querySelectorAll('.admin-product-card')];
+    if (cards.indexOf(dragged) < cards.indexOf(target)) target.after(dragged);
+    else target.before(dragged);
+    adminProductDragState.moved = true;
+}
+
+function finishAdminProductDrag(event) {
+    if (!adminProductDragState || event.pointerId !== adminProductDragState.pointerId) return;
+    const { card, handle, moved } = adminProductDragState;
+    try {
+        if (handle.hasPointerCapture?.(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+    } catch (error) {
+        // قد ينتهي التقاط المؤشر تلقائياً في بعض الأجهزة.
+    }
+    window.removeEventListener('pointermove', moveAdminProductCard);
+    window.removeEventListener('pointerup', finishAdminProductDrag);
+    window.removeEventListener('pointercancel', finishAdminProductDrag);
+    card.classList.remove('admin-product-dragging');
+    document.body.classList.remove('admin-product-reordering');
+    adminProductDragState = null;
+    if (moved) saveAdminProductOrder();
+}
+
+function startAdminProductDrag(event, productId) {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    const handle = event.currentTarget;
+    const card = handle.closest('.admin-product-card');
+    if (!card) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    adminProductDragState = {
+        pointerId: event.pointerId,
+        productId: String(productId),
+        card,
+        handle,
+        moved: false
+    };
+    try {
+        handle.setPointerCapture?.(event.pointerId);
+    } catch (error) {
+        // تستمر مستمعات النافذة بالسحب حتى دون التقاط المؤشر.
+    }
+    card.classList.add('admin-product-dragging');
+    document.body.classList.add('admin-product-reordering');
+    window.addEventListener('pointermove', moveAdminProductCard, { passive: false });
+    window.addEventListener('pointerup', finishAdminProductDrag);
+    window.addEventListener('pointercancel', finishAdminProductDrag);
+}
+
 let lastOfflineImageCacheSignature = '';
 
 function cacheProductImagesForOffline() {
@@ -1583,7 +1672,7 @@ function renderProducts() {
     const filteredPosProducts = orderedPosProducts.filter(p => !p.isHidden && (activeCategoryFilter === 'الكل' || p.category === activeCategoryFilter));
     let posHasProducts = filteredPosProducts.length > 0;
 
-    db.products.forEach(p => {
+    orderedPosProducts.forEach(p => {
         let catBadge = p.category ? `<div style="font-size:11px; color:var(--text-muted); margin-bottom:5px;">${p.category}</div>` : '';
         let isLocked = p.isHidden ? true : false;
         let imgOpacity = isLocked ? "0.4" : "1";
@@ -1591,7 +1680,7 @@ function renderProducts() {
         let lockColor = isLocked ? "var(--text-muted)" : "var(--primary-green)";
         
         adminGridHtml += `
-            <div class="card" style="position: relative; padding: 8px;">
+            <div class="card admin-product-card" data-product-id="${p.id}" style="position: relative; padding: 8px;">
                 <div style="position: absolute; top: 12px; left: 12px; z-index: 2; background: rgba(0,0,0,0.5); border-radius: 50%; width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; cursor: pointer; color: ${lockColor}; font-size: 12px;" onclick="toggleProductLock(${p.id})">
                     <i class="fas ${lockIcon}"></i>
                 </div>
@@ -1603,6 +1692,9 @@ function renderProducts() {
                     <button class="btn-3d btn-blue" style="flex: 1; padding: 6px; font-size: 12px;" onclick="triggerFlip(this, () => openEditProduct(${p.id}))"><i class="fas fa-pen"></i></button>
                     <button class="btn-3d btn-red" style="flex: 1; padding: 6px; font-size: 12px;" onclick="triggerFlip(this, () => deleteProduct(${p.id}))"><i class="fas fa-trash"></i></button>
                 </div>
+                <button type="button" class="admin-order-handle" aria-label="اسحب لترتيب المنتج" onpointerdown="startAdminProductDrag(event, '${p.id}')">
+                    <i class="fas fa-grip-lines"></i><span>اسحب للترتيب</span>
+                </button>
             </div>`;
 
     });
