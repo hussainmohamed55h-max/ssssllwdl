@@ -11,7 +11,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="style.css?v=2.6">
+    <link rel="stylesheet" href="style.css?v=2.7">
 </head>
 <body class="light-mode">
 
@@ -44,7 +44,19 @@
                 <button class="btn-3d" onclick="triggerFlip(this, openAddProductModal)"><i class="fas fa-plus"></i> إضافة منتج</button>
                 <button class="btn-3d btn-blue" onclick="triggerFlip(this, () => openModal('categoryModal'))"><i class="fas fa-folder-plus"></i> إدارة الفئات</button>
             </div>
-            <h3 style="margin-bottom: 10px;">المنتجات الحالية:</h3>
+            <div class="admin-products-heading">
+                <h3>المنتجات الحالية:</h3>
+                <div class="admin-products-summary" aria-label="ملخص المنتجات">
+                    <div class="product-count-card product-count-locked">
+                        <span><i class="fas fa-lock"></i> المقفلة</span>
+                        <strong id="adminLockedProductsCount">0</strong>
+                    </div>
+                    <div class="product-count-card product-count-available">
+                        <span><i class="fas fa-lock-open"></i> المتوفر</span>
+                        <strong id="adminAvailableProductsCount">0</strong>
+                    </div>
+                </div>
+            </div>
             <div class="grid-3" id="admin-products-grid">
                 </div>
         </section>
@@ -347,6 +359,6 @@
     </script>
     <script src="./vendor/convex.browser.bundle.js"></script>
     <script src="./convex-config.js"></script>
-    <script src="script.js?v=4.5.0"></script>
+    <script src="script.js?v=4.6.0"></script>
 </body>
 </html>
