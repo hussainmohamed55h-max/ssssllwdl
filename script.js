@@ -1,5 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '4.6.0';
+const APP_VERSION = '4.7.0';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
@@ -1657,6 +1657,25 @@ function cacheProductImagesForOffline() {
     }).catch(error => console.warn('تعذر تجهيز صور المنتجات للعمل دون إنترنت.', error));
 }
 
+let activeProductSearch = '';
+
+function normalizeProductSearch(value) {
+    return String(value || '')
+        .normalize('NFKD')
+        .replace(/[\u064B-\u065F\u0670\u0640]/g, '')
+        .replace(/[أإآ]/g, 'ا')
+        .replace(/ى/g, 'ي')
+        .replace(/ة/g, 'ه')
+        .toLocaleLowerCase()
+        .trim()
+        .replace(/\s+/g, ' ');
+}
+
+function filterSaleProducts(value) {
+    activeProductSearch = normalizeProductSearch(value);
+    renderProducts();
+}
+
 function renderProducts() {
     const posGrid = document.getElementById('pos-products-grid');
     const adminGrid = document.getElementById('admin-products-grid');
@@ -1691,7 +1710,13 @@ function renderProducts() {
     let posGridHtml = '';
     let adminGridHtml = '';
     const orderedPosProducts = getOrderedPosProducts();
-    const filteredPosProducts = orderedPosProducts.filter(p => !p.isHidden && (activeCategoryFilter === 'الكل' || p.category === activeCategoryFilter));
+    const filteredPosProducts = orderedPosProducts.filter(product => {
+        if (product.isHidden) return false;
+        if (activeCategoryFilter !== 'الكل' && product.category !== activeCategoryFilter) return false;
+        if (!activeProductSearch) return true;
+        const searchableProductText = normalizeProductSearch(`${product.name || ''} ${product.category || ''}`);
+        return searchableProductText.includes(activeProductSearch);
+    });
     let posHasProducts = filteredPosProducts.length > 0;
 
     orderedPosProducts.forEach(p => {
@@ -1723,32 +1748,31 @@ function renderProducts() {
 
     });
 
-    orderedPosProducts.forEach(p => {
-        if (!p.isHidden && (activeCategoryFilter === 'الكل' || p.category === activeCategoryFilter)) {
-            let catBadge = p.category ? `<div style="font-size:11px; color:var(--text-muted); margin-bottom:5px;">${p.category}</div>` : '';
-            let halfCartonBadge = p.allowHalfCarton ? '<div class="half-carton-badge"><i class="fas fa-box-open"></i> يدعم تنقيص النصف</div>' : '';
-            let posActionHtml = getProductCartActionsHtml(p);
-            let halfCartonToggleHtml = getHalfCartonToggleHtml(p, db.cart.find(item => item.id == p.id));
+    filteredPosProducts.forEach(p => {
+        let catBadge = p.category ? `<div style="font-size:11px; color:var(--text-muted); margin-bottom:5px;">${p.category}</div>` : '';
+        let halfCartonBadge = p.allowHalfCarton ? '<div class="half-carton-badge"><i class="fas fa-box-open"></i> يدعم تنقيص النصف</div>' : '';
+        let posActionHtml = getProductCartActionsHtml(p);
+        let halfCartonToggleHtml = getHalfCartonToggleHtml(p, db.cart.find(item => item.id == p.id));
 
-            posGridHtml += `
-                <div class="card pos-product-card" data-product-id="${p.id}" style="position:relative; display:flex; flex-direction:column; justify-content:space-between; padding:8px;">
-                    <div style="background: transparent; border: none; padding: 0; margin: 0; width: 100%; text-align: right; color: inherit; flex: 1; user-select: none; display: block;">
-                        <img src="${getProductImageUrl(p)}" alt="صورة" loading="lazy" style="pointer-events: none; width: 100%; height: auto; aspect-ratio: 1/1; object-fit: cover; border-radius: 8px;">
-                        <div class="pos-product-title-row">
-                            <h3 style="pointer-events: none; font-size: 13px; margin: 5px 0;">${p.name}</h3>
-                            <span class="product-half-toggle-slot">${halfCartonToggleHtml}</span>
-                        </div>
-                        <div style="pointer-events: none;">${catBadge}</div>
-                        <div style="pointer-events: none;">${halfCartonBadge}</div>
-                        <div class="price" style="pointer-events: none; font-size: 13px; margin-bottom: 6px;">${p.price.toLocaleString()} د.ع</div>
+        posGridHtml += `
+            <div class="card pos-product-card" data-product-id="${p.id}" style="position:relative; display:flex; flex-direction:column; justify-content:space-between; padding:8px;">
+                <div style="background: transparent; border: none; padding: 0; margin: 0; width: 100%; text-align: right; color: inherit; flex: 1; user-select: none; display: block;">
+                    <img src="${getProductImageUrl(p)}" alt="صورة" loading="lazy" style="pointer-events: none; width: 100%; height: auto; aspect-ratio: 1/1; object-fit: cover; border-radius: 8px;">
+                    <div class="pos-product-title-row">
+                        <h3 style="pointer-events: none; font-size: 13px; margin: 5px 0;">${p.name}</h3>
+                        <span class="product-half-toggle-slot">${halfCartonToggleHtml}</span>
                     </div>
-                    <div class="product-cart-actions">${posActionHtml}</div>
-                </div>`;
-        }
+                    <div style="pointer-events: none;">${catBadge}</div>
+                    <div style="pointer-events: none;">${halfCartonBadge}</div>
+                    <div class="price" style="pointer-events: none; font-size: 13px; margin-bottom: 6px;">${p.price.toLocaleString()} د.ع</div>
+                </div>
+                <div class="product-cart-actions">${posActionHtml}</div>
+            </div>`;
     });
 
     if (!posHasProducts && db.products.length > 0) {
-        posGridHtml = '<p style="grid-column: span 3; text-align: center; color: var(--text-muted); margin-top: 20px;">لا توجد منتجات مسجلة في هذه الفئة.</p>';
+        const emptyMessage = activeProductSearch ? 'لا توجد منتجات مطابقة للبحث.' : 'لا توجد منتجات مسجلة في هذه الفئة.';
+        posGridHtml = `<p style="grid-column: span 3; text-align: center; color: var(--text-muted); margin-top: 20px;">${emptyMessage}</p>`;
     }
 
     posGrid.innerHTML = posGridHtml;
@@ -1764,9 +1788,9 @@ function getProductCartActionsHtml(product) {
     return `
         <div style="font-size: 12px; color: var(--primary-green); margin-top: 5px; font-weight: bold;">الإجمالي: ${(cartItem.price * cartItem.qty).toLocaleString()} د.ع</div>
         <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 5px; gap: 5px;">
-            <button class="btn-3d btn-red" style="width: 40px; padding: 5px;" onclick="changeQtyById(${product.id}, -1)">-</button>
+            <button class="btn-3d btn-red product-qty-button" onclick="changeQtyById(${product.id}, -1)" aria-label="إنقاص الكمية">−</button>
             <span class="cart-qty-value" onclick="editQtyById(${product.id})">${cartItem.qty}</span>
-            <button class="btn-3d btn-blue" style="width: 40px; padding: 5px;" onclick="changeQtyById(${product.id}, 1)">+</button>
+            <button class="btn-3d btn-blue product-qty-button" onclick="changeQtyById(${product.id}, 1)" aria-label="زيادة الكمية">+</button>
         </div>
         <input type="text" placeholder="ملاحظة (اختياري)..." value="${cartItem.note || ''}" onchange="updateItemNote(${product.id}, this.value)" style="width: 100%; margin-top: 8px; padding: 6px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--input-bg); color: var(--text-light); text-align: center; font-size: 12px; outline: none; transition: 0.3s;" onfocus="this.style.borderColor='var(--primary-green)'" onblur="this.style.borderColor='var(--border-color)'">`;
 }

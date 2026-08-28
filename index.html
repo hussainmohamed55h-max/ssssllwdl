@@ -11,7 +11,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="style.css?v=2.7">
+    <link rel="stylesheet" href="style.css?v=2.8">
 </head>
 <body class="light-mode">
 
@@ -26,7 +26,7 @@
     <main>
         <section id="tab-pos" class="tab-content active">
             <div class="header-pos">
-                <input type="text" placeholder="بحث عن منتج... 🔍">
+                <input type="search" id="posProductSearch" placeholder="بحث عن منتج... 🔍" autocomplete="off" oninput="filterSaleProducts(this.value)">
                 <div class="cart-icon-btn" onclick="triggerFlip(this, () => openModal('cartModal'))">
                     <i class="fas fa-shopping-cart"></i>
                     <span class="cart-badge" id="cart-count">0</span>
@@ -359,6 +359,6 @@
     </script>
     <script src="./vendor/convex.browser.bundle.js"></script>
     <script src="./convex-config.js"></script>
-    <script src="script.js?v=4.6.0"></script>
+    <script src="script.js?v=4.7.0"></script>
 </body>
 </html>
