@@ -1,5 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '4.7.0';
+const APP_VERSION = '4.8.0';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
