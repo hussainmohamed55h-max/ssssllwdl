@@ -1,5 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '4.3.0';
+const APP_VERSION = '4.4.0';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
@@ -1444,7 +1444,17 @@ async function saveProduct() {
         delete p.img;
         
         let c = db.cart.find(x => x.id == editId);
-        if(c) { c.name = name; c.price = price; c.allowHalfCarton = allowHalfCarton; updateCartUI(); }
+        if(c) {
+            const wasHalfCarton = isCartItemHalfCarton(c);
+            c.name = name;
+            c.price = price;
+            c.allowHalfCarton = allowHalfCarton;
+            if (!allowHalfCarton && wasHalfCarton) {
+                c.qty = 1;
+                c.isHalfCarton = false;
+            }
+            updateCartUI();
+        }
 
         try {
             await saveProductAndQueueOperation(p, 'update');
@@ -1680,7 +1690,7 @@ function renderProducts() {
 
     orderedPosProducts.forEach(p => {
         let catBadge = p.category ? `<div style="font-size:11px; color:var(--text-muted); margin-bottom:5px;">${p.category}</div>` : '';
-        let halfCartonBadge = p.allowHalfCarton ? '<div class="half-carton-badge"><i class="fas fa-box-open"></i> بيع نصف كارتون</div>' : '';
+        let halfCartonBadge = p.allowHalfCarton ? '<div class="half-carton-badge"><i class="fas fa-box-open"></i> خيار النصف مفعّل</div>' : '';
         let isLocked = p.isHidden ? true : false;
         let imgOpacity = isLocked ? "0.4" : "1";
         let lockIcon = isLocked ? "fa-lock" : "fa-unlock";
@@ -1710,7 +1720,7 @@ function renderProducts() {
     orderedPosProducts.forEach(p => {
         if (!p.isHidden && (activeCategoryFilter === 'الكل' || p.category === activeCategoryFilter)) {
             let catBadge = p.category ? `<div style="font-size:11px; color:var(--text-muted); margin-bottom:5px;">${p.category}</div>` : '';
-            let halfCartonBadge = p.allowHalfCarton ? '<div class="half-carton-badge"><i class="fas fa-box-open"></i> نصف كارتون</div>' : '';
+            let halfCartonBadge = p.allowHalfCarton ? '<div class="half-carton-badge"><i class="fas fa-box-open"></i> يدعم النصف</div>' : '';
             let posActionHtml = getProductCartActionsHtml(p);
 
             posGridHtml += `
@@ -1738,18 +1748,32 @@ function renderProducts() {
 
 function getProductCartActionsHtml(product) {
     const cartItem = db.cart.find(item => item.id == product.id);
-    const quantityStep = getProductQuantityStep(product);
+    const halfCartonSelected = isCartItemHalfCarton(cartItem);
+    const halfCartonToggle = getHalfCartonToggleHtml(product, cartItem);
     if (!cartItem) {
-        return `<button class="btn-3d btn-green" style="margin-top: 10px; width: 100%;" onclick="triggerFlip(this, () => addToCart(${product.id}))"><i class="fas fa-cart-plus"></i> أضف للسلة</button>`;
+        return `${halfCartonToggle}<button class="btn-3d btn-green" style="margin-top: 10px; width: 100%;" onclick="triggerFlip(this, () => addToCart(${product.id}))"><i class="fas fa-cart-plus"></i> أضف للسلة</button>`;
     }
+    const quantityButtonState = halfCartonSelected ? 'disabled aria-disabled="true"' : '';
+    const quantityValueAction = halfCartonSelected ? 'aria-label="الكمية ثابتة على نصف كارتون"' : `onclick="editQtyById(${product.id})"`;
     return `
+        ${halfCartonToggle}
         <div style="font-size: 12px; color: var(--primary-green); margin-top: 5px; font-weight: bold;">الإجمالي: ${(cartItem.price * cartItem.qty).toLocaleString()} د.ع</div>
         <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 5px; gap: 5px;">
-            <button class="btn-3d btn-red" style="width: 40px; padding: 5px;" onclick="changeQtyById(${product.id}, -${quantityStep})">-</button>
-            <span style="font-weight: bold; font-size: 18px; cursor: pointer; border-bottom: 1px dashed var(--primary-green);" onclick="editQtyById(${product.id})">${cartItem.qty}</span>
-            <button class="btn-3d btn-blue" style="width: 40px; padding: 5px;" onclick="changeQtyById(${product.id}, ${quantityStep})">+</button>
+            <button class="btn-3d btn-red" style="width: 40px; padding: 5px;" onclick="changeQtyById(${product.id}, -1)" ${quantityButtonState}>-</button>
+            <span class="cart-qty-value${halfCartonSelected ? ' locked' : ''}" ${quantityValueAction}>${cartItem.qty}</span>
+            <button class="btn-3d btn-blue" style="width: 40px; padding: 5px;" onclick="changeQtyById(${product.id}, 1)" ${quantityButtonState}>+</button>
         </div>
         <input type="text" placeholder="ملاحظة (اختياري)..." value="${cartItem.note || ''}" onchange="updateItemNote(${product.id}, this.value)" style="width: 100%; margin-top: 8px; padding: 6px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--input-bg); color: var(--text-light); text-align: center; font-size: 12px; outline: none; transition: 0.3s;" onfocus="this.style.borderColor='var(--primary-green)'" onblur="this.style.borderColor='var(--border-color)'">`;
+}
+
+function getHalfCartonToggleHtml(product, cartItem) {
+    if (!product || product.allowHalfCarton !== true) return '';
+    const isSelected = isCartItemHalfCarton(cartItem);
+    return `
+        <label class="half-carton-toggle${isSelected ? ' selected' : ''}">
+            <input type="checkbox" ${isSelected ? 'checked' : ''} onchange="toggleHalfCartonById(${product.id}, this.checked)">
+            <span><i class="fas fa-check"></i> نصف</span>
+        </label>`;
 }
 
 function refreshProductCartActions() {
@@ -1917,10 +1941,16 @@ function updateCartCustomerSelect() {
 // ==========================================
 // 6. نظام السلة والحفظ والتصدير
 // ==========================================
-function getProductQuantityStep(productOrCartItem) {
-    const productId = productOrCartItem && productOrCartItem.id;
-    const currentProduct = db.products.find(product => product.id == productId);
-    return (currentProduct || productOrCartItem)?.allowHalfCarton === true ? 0.5 : 1;
+function isCartItemHalfCarton(item) {
+    if (!item) return false;
+    if (item.isHalfCarton === true) return true;
+    const currentProduct = db.products.find(product => product.id == item.id);
+    const halfCartonAllowed = (currentProduct || item).allowHalfCarton === true;
+    return item.isHalfCarton !== false && halfCartonAllowed && Number(item.qty) === 0.5;
+}
+
+function isInvoiceItemHalfCarton(item) {
+    return Boolean(item) && (item.isHalfCarton === true || Number(item.qty) === 0.5);
 }
 
 function roundCartQuantity(quantity) {
@@ -1931,13 +1961,34 @@ function addToCart(productId) {
     let product = db.products.find(p => p.id == productId);
     if (!product) return;
     let existing = db.cart.find(c => c.id == productId);
-    const quantityStep = getProductQuantityStep(product);
     if(existing) {
+        if (isCartItemHalfCarton(existing)) return;
         existing.allowHalfCarton = product.allowHalfCarton === true;
-        existing.qty = roundCartQuantity(existing.qty + quantityStep);
+        existing.qty = roundCartQuantity(existing.qty + 1);
     } else {
-        db.cart.push({ ...product, qty: quantityStep });
+        db.cart.push({ ...product, qty: 1, isHalfCarton: false });
     }
+    saveLocal();
+    updateCartUI();
+}
+
+function toggleHalfCartonById(productId, isSelected) {
+    const product = db.products.find(item => item.id == productId);
+    if (!product || product.allowHalfCarton !== true) return;
+    let cartItem = db.cart.find(item => item.id == productId);
+
+    if (!cartItem) {
+        cartItem = { ...product, qty: isSelected ? 0.5 : 1, isHalfCarton: isSelected === true };
+        db.cart.push(cartItem);
+    } else if (isSelected) {
+        cartItem.qty = 0.5;
+        cartItem.isHalfCarton = true;
+        cartItem.allowHalfCarton = true;
+    } else {
+        cartItem.qty = 1;
+        cartItem.isHalfCarton = false;
+    }
+
     saveLocal();
     updateCartUI();
 }
@@ -1968,6 +2019,7 @@ function parseArabicLocaleNumber(str) {
 function editQtyById(productId) {
     let index = db.cart.findIndex(c => c.id == productId);
     if (index !== -1) {
+        if (isCartItemHalfCarton(db.cart[index])) return;
         customPrompt("أدخل الكمية الجديدة لـ " + db.cart[index].name + ":", db.cart[index].qty, function(newQty) {
             let parsedQty = parseArabicLocaleNumber(newQty);
             if(!isNaN(parsedQty)) { 
@@ -1999,18 +2051,21 @@ function updateCartUI() {
     let cartHtml = '';
     
     db.cart.forEach((item, index) => {
-        const quantityStep = getProductQuantityStep(item);
+        const halfCartonSelected = isCartItemHalfCarton(item);
+        const quantityButtonState = halfCartonSelected ? 'disabled aria-disabled="true"' : '';
+        const quantityValueAction = halfCartonSelected ? 'aria-label="الكمية ثابتة على نصف كارتون"' : `onclick="editQtyById(${item.id})"`;
         cartHtml += `
             <div class="cart-item">
                 <div style="flex: 1;">
                     <div style="font-weight: bold; font-size: 15px; margin-bottom: 2px;">${item.name}</div>
+                    ${halfCartonSelected ? '<div class="cart-half-carton-label"><i class="fas fa-check-circle"></i> نصف كارتون</div>' : ''}
                     ${item.note ? `<div style="font-size: 11px; color: var(--primary-green); margin-bottom: 3px;">ملاحظة: ${item.note}</div>` : ''}
                     <div style="font-size: 13px; color: var(--text-muted);">السعر: <span class="editable-price" onclick="editPrice(${index})">${item.price.toLocaleString()}</span></div>
                 </div>
                 <div class="cart-item-controls">
-                    <button onclick="changeQty(${index}, -${quantityStep})">-</button>
-                    <span onclick="editQtyById(${item.id})" style="cursor: pointer; border-bottom: 1px dashed var(--primary-green); padding: 0 5px;">${item.qty}</span>
-                    <button onclick="changeQty(${index}, ${quantityStep})">+</button>
+                    <button onclick="changeQty(${index}, -1)" ${quantityButtonState}>-</button>
+                    <span class="cart-qty-value${halfCartonSelected ? ' locked' : ''}" ${quantityValueAction}>${item.qty}</span>
+                    <button onclick="changeQty(${index}, 1)" ${quantityButtonState}>+</button>
                     <i class="fas fa-trash" style="color: #ff4d4d; margin-right: 10px; cursor: pointer; font-size: 18px;" onclick="removeFromCart(${index})"></i>
                 </div>
             </div>`;
@@ -2022,6 +2077,7 @@ function updateCartUI() {
 
 function changeQty(index, change) {
     if (!db.cart[index]) return;
+    if (isCartItemHalfCarton(db.cart[index])) return;
     db.cart[index].qty = roundCartQuantity(db.cart[index].qty + change);
     if(db.cart[index].qty <= 0) db.cart.splice(index, 1);
     saveLocal();
@@ -2184,7 +2240,7 @@ function showOrderDetails(order) {
     let itemsHtml = "";
     order.items.forEach(item => {
         let itemTotal = item.price * item.qty;
-        itemsHtml += `<div class="order-item-row"><span>${item.name} ${item.note ? `<span style="font-size:11px; color:var(--primary-green);">(${item.note})</span>` : ''} <span style="color:var(--text-muted); font-size:11px;">x${item.qty}</span></span><span>${itemTotal.toLocaleString()} د.ع</span></div>`;
+        itemsHtml += `<div class="order-item-row"><span>${item.name} ${isInvoiceItemHalfCarton(item) ? '<span class="invoice-half-carton-label">(نصف كارتون)</span>' : ''} ${item.note ? `<span style="font-size:11px; color:var(--primary-green);">(${item.note})</span>` : ''} <span style="color:var(--text-muted); font-size:11px;">x${item.qty}</span></span><span>${itemTotal.toLocaleString()} د.ع</span></div>`;
     });
     document.getElementById('od-items-list').innerHTML = itemsHtml;
 
@@ -2213,7 +2269,7 @@ async function deleteOrderFromDetails(order) {
 
 function exportToPDF(order) {
     let printWindow = window.open('', '_blank'); let itemsRows = "";
-    order.items.forEach((item, i) => { itemsRows += `<tr><td style="border:1px solid #ddd; padding:8px;">${i+1}</td><td style="border:1px solid #ddd; padding:8px;">${item.name}${item.note ? `<br><span style="font-size:11px; color:#555;">${item.note}</span>` : ''}</td><td style="border:1px solid #ddd; padding:8px;">${item.qty}</td><td style="border:1px solid #ddd; padding:8px;">${item.price.toLocaleString()}</td><td style="border:1px solid #ddd; padding:8px;">${(item.price * item.qty).toLocaleString()}</td></tr>`; });
+    order.items.forEach((item, i) => { itemsRows += `<tr><td style="border:1px solid #ddd; padding:8px;">${i+1}</td><td style="border:1px solid #ddd; padding:8px;">${item.name}${isInvoiceItemHalfCarton(item) ? '<br><strong>نصف كارتون</strong>' : ''}${item.note ? `<br><span style="font-size:11px; color:#555;">${item.note}</span>` : ''}</td><td style="border:1px solid #ddd; padding:8px;">${item.qty}</td><td style="border:1px solid #ddd; padding:8px;">${item.price.toLocaleString()}</td><td style="border:1px solid #ddd; padding:8px;">${(item.price * item.qty).toLocaleString()}</td></tr>`; });
 
     let html = `
     <html dir="rtl" lang="ar">
@@ -2249,7 +2305,7 @@ function exportToPDF(order) {
 
 function shareWhatsApp(order) {
     let text = `*فاتورة مبيعات*\nرقم: ${order.id}\nالعميل: ${order.customer}\nالتاريخ: ${order.date} ${order.time}\n\n*المشتريات:*\n`;
-    order.items.forEach((item, i) => { text += `${i+1}. ${item.name}${item.note ? ` (${item.note})` : ''} - العدد: ${item.qty} - السعر: ${(item.price * item.qty).toLocaleString()} د.ع\n`; });
+    order.items.forEach((item, i) => { text += `${i+1}. ${item.name}${isInvoiceItemHalfCarton(item) ? ' (نصف كارتون)' : ''}${item.note ? ` (${item.note})` : ''} - العدد: ${item.qty} - السعر: ${(item.price * item.qty).toLocaleString()} د.ع\n`; });
     text += `\n*الإجمالي الكلي: ${order.total.toLocaleString()} د.ع*\nحالة الدفع: ${order.status}`;
     let url = `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;
     if(order.phone) url = `https://api.whatsapp.com/send?phone=${order.phone.replace(/^0/, '+964')}&text=${encodeURIComponent(text)}`;
