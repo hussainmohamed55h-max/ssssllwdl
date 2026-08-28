@@ -1,5 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '4.5.0';
+const APP_VERSION = '4.6.0';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
@@ -1660,6 +1660,13 @@ function cacheProductImagesForOffline() {
 function renderProducts() {
     const posGrid = document.getElementById('pos-products-grid');
     const adminGrid = document.getElementById('admin-products-grid');
+    const lockedProductsCount = db.products.filter(product => product.isHidden === true).length;
+    const availableProductsCount = db.products.length - lockedProductsCount;
+    const lockedProductsCountElement = document.getElementById('adminLockedProductsCount');
+    const availableProductsCountElement = document.getElementById('adminAvailableProductsCount');
+
+    if (lockedProductsCountElement) lockedProductsCountElement.textContent = lockedProductsCount.toLocaleString();
+    if (availableProductsCountElement) availableProductsCountElement.textContent = availableProductsCount.toLocaleString();
     
     // Force grid-3 to avoid browser caching old grid-2 class in HTML
     if (posGrid) {
