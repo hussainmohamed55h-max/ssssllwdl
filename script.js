@@ -1,5 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '4.4.0';
+const APP_VERSION = '4.5.0';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
@@ -1445,12 +1445,11 @@ async function saveProduct() {
         
         let c = db.cart.find(x => x.id == editId);
         if(c) {
-            const wasHalfCarton = isCartItemHalfCarton(c);
             c.name = name;
             c.price = price;
             c.allowHalfCarton = allowHalfCarton;
-            if (!allowHalfCarton && wasHalfCarton) {
-                c.qty = 1;
+            if (!allowHalfCarton) {
+                c.halfDecrementEnabled = false;
                 c.isHalfCarton = false;
             }
             updateCartUI();
@@ -1690,7 +1689,7 @@ function renderProducts() {
 
     orderedPosProducts.forEach(p => {
         let catBadge = p.category ? `<div style="font-size:11px; color:var(--text-muted); margin-bottom:5px;">${p.category}</div>` : '';
-        let halfCartonBadge = p.allowHalfCarton ? '<div class="half-carton-badge"><i class="fas fa-box-open"></i> خيار النصف مفعّل</div>' : '';
+        let halfCartonBadge = p.allowHalfCarton ? '<div class="half-carton-badge"><i class="fas fa-box-open"></i> تنقيص النصف مفعّل</div>' : '';
         let isLocked = p.isHidden ? true : false;
         let imgOpacity = isLocked ? "0.4" : "1";
         let lockIcon = isLocked ? "fa-lock" : "fa-unlock";
@@ -1720,14 +1719,18 @@ function renderProducts() {
     orderedPosProducts.forEach(p => {
         if (!p.isHidden && (activeCategoryFilter === 'الكل' || p.category === activeCategoryFilter)) {
             let catBadge = p.category ? `<div style="font-size:11px; color:var(--text-muted); margin-bottom:5px;">${p.category}</div>` : '';
-            let halfCartonBadge = p.allowHalfCarton ? '<div class="half-carton-badge"><i class="fas fa-box-open"></i> يدعم النصف</div>' : '';
+            let halfCartonBadge = p.allowHalfCarton ? '<div class="half-carton-badge"><i class="fas fa-box-open"></i> يدعم تنقيص النصف</div>' : '';
             let posActionHtml = getProductCartActionsHtml(p);
+            let halfCartonToggleHtml = getHalfCartonToggleHtml(p, db.cart.find(item => item.id == p.id));
 
             posGridHtml += `
                 <div class="card pos-product-card" data-product-id="${p.id}" style="position:relative; display:flex; flex-direction:column; justify-content:space-between; padding:8px;">
                     <div style="background: transparent; border: none; padding: 0; margin: 0; width: 100%; text-align: right; color: inherit; flex: 1; user-select: none; display: block;">
                         <img src="${getProductImageUrl(p)}" alt="صورة" loading="lazy" style="pointer-events: none; width: 100%; height: auto; aspect-ratio: 1/1; object-fit: cover; border-radius: 8px;">
-                        <h3 style="pointer-events: none; font-size: 13px; margin: 5px 0;">${p.name}</h3>
+                        <div class="pos-product-title-row">
+                            <h3 style="pointer-events: none; font-size: 13px; margin: 5px 0;">${p.name}</h3>
+                            <span class="product-half-toggle-slot">${halfCartonToggleHtml}</span>
+                        </div>
                         <div style="pointer-events: none;">${catBadge}</div>
                         <div style="pointer-events: none;">${halfCartonBadge}</div>
                         <div class="price" style="pointer-events: none; font-size: 13px; margin-bottom: 6px;">${p.price.toLocaleString()} د.ع</div>
@@ -1748,32 +1751,25 @@ function renderProducts() {
 
 function getProductCartActionsHtml(product) {
     const cartItem = db.cart.find(item => item.id == product.id);
-    const halfCartonSelected = isCartItemHalfCarton(cartItem);
-    const halfCartonToggle = getHalfCartonToggleHtml(product, cartItem);
     if (!cartItem) {
-        return `${halfCartonToggle}<button class="btn-3d btn-green" style="margin-top: 10px; width: 100%;" onclick="triggerFlip(this, () => addToCart(${product.id}))"><i class="fas fa-cart-plus"></i> أضف للسلة</button>`;
+        return `<button class="btn-3d btn-green" style="margin-top: 10px; width: 100%;" onclick="triggerFlip(this, () => addToCart(${product.id}))"><i class="fas fa-cart-plus"></i> أضف للسلة</button>`;
     }
-    const quantityButtonState = halfCartonSelected ? 'disabled aria-disabled="true"' : '';
-    const quantityValueAction = halfCartonSelected ? 'aria-label="الكمية ثابتة على نصف كارتون"' : `onclick="editQtyById(${product.id})"`;
     return `
-        ${halfCartonToggle}
         <div style="font-size: 12px; color: var(--primary-green); margin-top: 5px; font-weight: bold;">الإجمالي: ${(cartItem.price * cartItem.qty).toLocaleString()} د.ع</div>
         <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 5px; gap: 5px;">
-            <button class="btn-3d btn-red" style="width: 40px; padding: 5px;" onclick="changeQtyById(${product.id}, -1)" ${quantityButtonState}>-</button>
-            <span class="cart-qty-value${halfCartonSelected ? ' locked' : ''}" ${quantityValueAction}>${cartItem.qty}</span>
-            <button class="btn-3d btn-blue" style="width: 40px; padding: 5px;" onclick="changeQtyById(${product.id}, 1)" ${quantityButtonState}>+</button>
+            <button class="btn-3d btn-red" style="width: 40px; padding: 5px;" onclick="changeQtyById(${product.id}, -1)">-</button>
+            <span class="cart-qty-value" onclick="editQtyById(${product.id})">${cartItem.qty}</span>
+            <button class="btn-3d btn-blue" style="width: 40px; padding: 5px;" onclick="changeQtyById(${product.id}, 1)">+</button>
         </div>
         <input type="text" placeholder="ملاحظة (اختياري)..." value="${cartItem.note || ''}" onchange="updateItemNote(${product.id}, this.value)" style="width: 100%; margin-top: 8px; padding: 6px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--input-bg); color: var(--text-light); text-align: center; font-size: 12px; outline: none; transition: 0.3s;" onfocus="this.style.borderColor='var(--primary-green)'" onblur="this.style.borderColor='var(--border-color)'">`;
 }
 
 function getHalfCartonToggleHtml(product, cartItem) {
-    if (!product || product.allowHalfCarton !== true) return '';
-    const isSelected = isCartItemHalfCarton(cartItem);
-    return `
-        <label class="half-carton-toggle${isSelected ? ' selected' : ''}">
-            <input type="checkbox" ${isSelected ? 'checked' : ''} onchange="toggleHalfCartonById(${product.id}, this.checked)">
-            <span><i class="fas fa-check"></i> نصف</span>
-        </label>`;
+    if (!product || product.allowHalfCarton !== true || !cartItem) return '';
+    const isSelected = isHalfDecrementEnabled(cartItem);
+    return `<label class="half-carton-toggle${isSelected ? ' selected' : ''}" title="تنقيص نصف كارتون">
+        <input type="checkbox" aria-label="تنقيص نصف كارتون" ${isSelected ? 'checked' : ''} onchange="toggleHalfCartonById(${product.id}, this.checked)">
+    </label>`;
 }
 
 function refreshProductCartActions() {
@@ -1781,6 +1777,9 @@ function refreshProductCartActions() {
         const product = db.products.find(item => String(item.id) === String(card.dataset.productId));
         const actions = card.querySelector('.product-cart-actions');
         if (product && actions) actions.innerHTML = getProductCartActionsHtml(product);
+        const halfToggleSlot = card.querySelector('.product-half-toggle-slot');
+        const cartItem = db.cart.find(item => String(item.id) === String(card.dataset.productId));
+        if (product && halfToggleSlot) halfToggleSlot.innerHTML = getHalfCartonToggleHtml(product, cartItem);
     });
 }
 
@@ -1941,16 +1940,17 @@ function updateCartCustomerSelect() {
 // ==========================================
 // 6. نظام السلة والحفظ والتصدير
 // ==========================================
-function isCartItemHalfCarton(item) {
+function isHalfDecrementEnabled(item) {
     if (!item) return false;
-    if (item.isHalfCarton === true) return true;
     const currentProduct = db.products.find(product => product.id == item.id);
     const halfCartonAllowed = (currentProduct || item).allowHalfCarton === true;
-    return item.isHalfCarton !== false && halfCartonAllowed && Number(item.qty) === 0.5;
+    return halfCartonAllowed && (item.halfDecrementEnabled === true || item.isHalfCarton === true);
 }
 
 function isInvoiceItemHalfCarton(item) {
-    return Boolean(item) && (item.isHalfCarton === true || Number(item.qty) === 0.5);
+    if (!item) return false;
+    const quantity = Number(item.qty);
+    return Number.isFinite(quantity) && Math.abs(quantity % 1) === 0.5;
 }
 
 function roundCartQuantity(quantity) {
@@ -1962,11 +1962,10 @@ function addToCart(productId) {
     if (!product) return;
     let existing = db.cart.find(c => c.id == productId);
     if(existing) {
-        if (isCartItemHalfCarton(existing)) return;
         existing.allowHalfCarton = product.allowHalfCarton === true;
         existing.qty = roundCartQuantity(existing.qty + 1);
     } else {
-        db.cart.push({ ...product, qty: 1, isHalfCarton: false });
+        db.cart.push({ ...product, qty: 1, halfDecrementEnabled: false, isHalfCarton: false });
     }
     saveLocal();
     updateCartUI();
@@ -1976,18 +1975,10 @@ function toggleHalfCartonById(productId, isSelected) {
     const product = db.products.find(item => item.id == productId);
     if (!product || product.allowHalfCarton !== true) return;
     let cartItem = db.cart.find(item => item.id == productId);
-
-    if (!cartItem) {
-        cartItem = { ...product, qty: isSelected ? 0.5 : 1, isHalfCarton: isSelected === true };
-        db.cart.push(cartItem);
-    } else if (isSelected) {
-        cartItem.qty = 0.5;
-        cartItem.isHalfCarton = true;
-        cartItem.allowHalfCarton = true;
-    } else {
-        cartItem.qty = 1;
-        cartItem.isHalfCarton = false;
-    }
+    if (!cartItem) return;
+    cartItem.halfDecrementEnabled = isSelected === true;
+    cartItem.isHalfCarton = false;
+    cartItem.allowHalfCarton = true;
 
     saveLocal();
     updateCartUI();
@@ -2019,7 +2010,6 @@ function parseArabicLocaleNumber(str) {
 function editQtyById(productId) {
     let index = db.cart.findIndex(c => c.id == productId);
     if (index !== -1) {
-        if (isCartItemHalfCarton(db.cart[index])) return;
         customPrompt("أدخل الكمية الجديدة لـ " + db.cart[index].name + ":", db.cart[index].qty, function(newQty) {
             let parsedQty = parseArabicLocaleNumber(newQty);
             if(!isNaN(parsedQty)) { 
@@ -2051,21 +2041,17 @@ function updateCartUI() {
     let cartHtml = '';
     
     db.cart.forEach((item, index) => {
-        const halfCartonSelected = isCartItemHalfCarton(item);
-        const quantityButtonState = halfCartonSelected ? 'disabled aria-disabled="true"' : '';
-        const quantityValueAction = halfCartonSelected ? 'aria-label="الكمية ثابتة على نصف كارتون"' : `onclick="editQtyById(${item.id})"`;
         cartHtml += `
             <div class="cart-item">
                 <div style="flex: 1;">
                     <div style="font-weight: bold; font-size: 15px; margin-bottom: 2px;">${item.name}</div>
-                    ${halfCartonSelected ? '<div class="cart-half-carton-label"><i class="fas fa-check-circle"></i> نصف كارتون</div>' : ''}
                     ${item.note ? `<div style="font-size: 11px; color: var(--primary-green); margin-bottom: 3px;">ملاحظة: ${item.note}</div>` : ''}
                     <div style="font-size: 13px; color: var(--text-muted);">السعر: <span class="editable-price" onclick="editPrice(${index})">${item.price.toLocaleString()}</span></div>
                 </div>
                 <div class="cart-item-controls">
-                    <button onclick="changeQty(${index}, -1)" ${quantityButtonState}>-</button>
-                    <span class="cart-qty-value${halfCartonSelected ? ' locked' : ''}" ${quantityValueAction}>${item.qty}</span>
-                    <button onclick="changeQty(${index}, 1)" ${quantityButtonState}>+</button>
+                    <button onclick="changeQty(${index}, -1)">-</button>
+                    <span class="cart-qty-value" onclick="editQtyById(${item.id})">${item.qty}</span>
+                    <button onclick="changeQty(${index}, 1)">+</button>
                     <i class="fas fa-trash" style="color: #ff4d4d; margin-right: 10px; cursor: pointer; font-size: 18px;" onclick="removeFromCart(${index})"></i>
                 </div>
             </div>`;
@@ -2077,9 +2063,10 @@ function updateCartUI() {
 
 function changeQty(index, change) {
     if (!db.cart[index]) return;
-    if (isCartItemHalfCarton(db.cart[index])) return;
-    db.cart[index].qty = roundCartQuantity(db.cart[index].qty + change);
-    if(db.cart[index].qty <= 0) db.cart.splice(index, 1);
+    const cartItem = db.cart[index];
+    const appliedChange = change < 0 && isHalfDecrementEnabled(cartItem) ? -0.5 : change;
+    cartItem.qty = roundCartQuantity(cartItem.qty + appliedChange);
+    if(cartItem.qty <= 0) db.cart.splice(index, 1);
     saveLocal();
     updateCartUI();
 }
