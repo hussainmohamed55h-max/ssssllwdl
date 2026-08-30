@@ -1,5 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '4.8.0';
+const APP_VERSION = '4.9.0';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
@@ -197,6 +197,26 @@ async function saveAppDataAndQueueOperation(type, entityId, action, payload) {
     });
 }
 
+async function saveCustomerAndRelatedInvoices(customer, customerAction, invoices) {
+    const idb = await initIndexedDB();
+    const relatedInvoices = Array.isArray(invoices) ? invoices : [];
+    return new Promise((resolve, reject) => {
+        const transaction = idb.transaction([IDB_STORE, IDB_SYNC_QUEUE_STORE], 'readwrite');
+        transaction.objectStore(IDB_STORE).put(
+            JSON.parse(JSON.stringify(getAppDataWithoutProducts())),
+            'pos_db_abu_amir'
+        );
+        const queueStore = transaction.objectStore(IDB_SYNC_QUEUE_STORE);
+        queueStore.put(createSyncQueueItem('customer', customer.id, customerAction, customer));
+        relatedInvoices.forEach(invoice => {
+            queueStore.put(createSyncQueueItem('invoice', invoice.id, 'update', invoice));
+        });
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+    });
+}
+
 async function saveProductAndQueueOperation(product, action) {
     const idb = await initIndexedDB();
     const storedProduct = normalizeProductForStorage(product);
@@ -326,7 +346,13 @@ async function sendInvoiceSyncItem(client, item) {
         return client.mutation(invoiceApi.createInvoice, normalizeInvoiceForConvex(item.payload));
     }
     if (item.action === 'update') {
-        return client.mutation(invoiceApi.updateInvoice, normalizeInvoiceForConvex(item.payload));
+        const payload = normalizeInvoiceForConvex(item.payload);
+        try {
+            return await client.mutation(invoiceApi.updateInvoice, payload);
+        } catch (error) {
+            if (!String(error && error.message || error).includes('Invoice not found')) throw error;
+            return client.mutation(invoiceApi.createInvoice, payload);
+        }
     }
     if (item.action === 'delete') {
         return client.mutation(invoiceApi.deleteInvoice, { localId: String(item.payload.localId) });
@@ -521,6 +547,9 @@ function addMissingCustomersFromInvoices(invoices, blockedNameKeys = new Set()) 
         const customerNameKey = normalizeCustomerNameKey(customerName);
         if (!customerName || customerName === 'زبون نقدي' || knownNames.has(customerNameKey) || blockedNameKeys.has(customerNameKey)) return;
         const customer = normalizeCustomerForStorage({
+            ...(typeof invoice.customerLocalId === 'string' && invoice.customerLocalId
+                ? { localId: invoice.customerLocalId }
+                : {}),
             id: nextCustomerId++,
             name: customerName,
             phone: String(invoice.phone || ''),
@@ -1817,6 +1846,29 @@ function refreshProductCartActions() {
 // ==========================================
 // 5. إدارة الزبائن
 // ==========================================
+function invoiceBelongsToCustomer(invoice, customer) {
+    if (!invoice || !customer) return false;
+    if (invoice.customerLocalId && customer.localId) {
+        return String(invoice.customerLocalId) === String(customer.localId);
+    }
+    return normalizeCustomerNameKey(invoice.customer) === normalizeCustomerNameKey(customer.name);
+}
+
+function linkInvoicesToCustomer(customer, previousCustomerName) {
+    const previousNameKey = normalizeCustomerNameKey(previousCustomerName);
+    const relatedInvoices = db.invoices.filter(invoice =>
+        (invoice.customerLocalId && invoice.customerLocalId === customer.localId) ||
+        (!invoice.customerLocalId && normalizeCustomerNameKey(invoice.customer) === previousNameKey)
+    );
+    relatedInvoices.forEach(invoice => {
+        invoice.localId = invoice.localId || createInvoiceLocalId();
+        invoice.customerLocalId = customer.localId;
+        invoice.customer = customer.name;
+        invoice.phone = customer.phone;
+    });
+    return relatedInvoices;
+}
+
 function openAddCustomerModal() {
     document.getElementById('customerModalTitle').innerText = 'إضافة زبون';
     document.getElementById('editCustId').value = '';
@@ -1871,12 +1923,15 @@ async function saveCustomer() {
     let address = document.getElementById('newCustAddress').value.trim();
     if(!name) { customAlert('يرجى إدخال اسم الزبون.'); return; }
     const previousCustomers = JSON.parse(JSON.stringify(db.customers));
+    const previousInvoices = JSON.parse(JSON.stringify(db.invoices));
     let editId = document.getElementById('editCustId').value;
     let customer;
     let action;
+    let relatedInvoices = [];
     if (editId) {
         customer = db.customers.find(x => x.id == editId);
         if (!customer) return;
+        const previousCustomerName = customer.name;
         Object.assign(customer, normalizeCustomerForStorage({
             ...customer,
             name,
@@ -1884,6 +1939,7 @@ async function saveCustomer() {
             address,
             updatedAt: Date.now()
         }));
+        relatedInvoices = linkInvoicesToCustomer(customer, previousCustomerName);
         action = 'update';
     } else {
         customer = normalizeCustomerForStorage({
@@ -1898,10 +1954,11 @@ async function saveCustomer() {
     }
 
     try {
-        await saveAppDataAndQueueOperation('customer', customer.id, action, customer);
+        await saveCustomerAndRelatedInvoices(customer, action, relatedInvoices);
         syncChangesIfOnline();
     } catch (error) {
         db.customers = previousCustomers;
+        db.invoices = previousInvoices;
         customAlert('تعذر حفظ بيانات الزبون محلياً. لم يتم فقدان البيانات السابقة.');
         return;
     }
@@ -1925,13 +1982,22 @@ function renderCustomers() {
     const latestInvoiceByCustomer = new Map();
     db.invoices.forEach((invoice, index) => {
         const invoiceOrder = Number(invoice.id || index);
-        const currentOrder = latestInvoiceByCustomer.get(invoice.customer) ?? -1;
-        if (invoiceOrder > currentOrder) latestInvoiceByCustomer.set(invoice.customer, invoiceOrder);
+        const invoiceKey = invoice.customerLocalId
+            ? `id:${invoice.customerLocalId}`
+            : `name:${normalizeCustomerNameKey(invoice.customer)}`;
+        const currentOrder = latestInvoiceByCustomer.get(invoiceKey) ?? -1;
+        if (invoiceOrder > currentOrder) latestInvoiceByCustomer.set(invoiceKey, invoiceOrder);
     });
 
     const orderedCustomers = [...db.customers].sort((first, second) => {
-        const firstSaleOrder = latestInvoiceByCustomer.get(first.name) ?? -1;
-        const secondSaleOrder = latestInvoiceByCustomer.get(second.name) ?? -1;
+        const firstSaleOrder = Math.max(
+            latestInvoiceByCustomer.get(`id:${first.localId}`) ?? -1,
+            latestInvoiceByCustomer.get(`name:${normalizeCustomerNameKey(first.name)}`) ?? -1
+        );
+        const secondSaleOrder = Math.max(
+            latestInvoiceByCustomer.get(`id:${second.localId}`) ?? -1,
+            latestInvoiceByCustomer.get(`name:${normalizeCustomerNameKey(second.name)}`) ?? -1
+        );
         if (secondSaleOrder !== firstSaleOrder) return secondSaleOrder - firstSaleOrder;
         const creationOrder = Number(second.id || 0) - Number(first.id || 0);
         if (creationOrder !== 0) return creationOrder;
@@ -2183,9 +2249,14 @@ async function saveOrderAndShowDetails() {
     let custInput = customerInput.value.trim();
     let custName = custInput;
     let custPhone = "";
+    let customerLocalId = "";
     if(custInput !== "") { 
-        let c = db.customers.find(x => x.name === custName); 
-        if(c) custPhone = c.phone; 
+        let c = db.customers.find(x => normalizeCustomerNameKey(x.name) === normalizeCustomerNameKey(custName));
+        if(c) {
+            custName = c.name;
+            custPhone = c.phone;
+            customerLocalId = c.localId;
+        }
     }
 
     let statusBtn = document.querySelector('.payment-btn.active');
@@ -2207,6 +2278,8 @@ async function saveOrderAndShowDetails() {
             order = db.invoices[existingIndex];
             order.localId = order.localId || createInvoiceLocalId();
             order.customer = custName;
+            if (customerLocalId) order.customerLocalId = customerLocalId;
+            else delete order.customerLocalId;
             order.phone = custPhone;
             order.status = status;
             order.statusColor = statusColor;
@@ -2214,13 +2287,13 @@ async function saveOrderAndShowDetails() {
             order.items = [...db.cart];
         } else {
             let orderId = db.invoices.length > 0 ? Math.max(...db.invoices.map(i => parseInt(i.id) || 1000)) + 1 : 1000;
-            order = { localId: createInvoiceLocalId(), id: orderId, customer: custName, phone: custPhone, date: dateString, time: timeString, status: status, statusColor: statusColor, total: total, items: [...db.cart] };
+            order = { localId: createInvoiceLocalId(), id: orderId, customer: custName, ...(customerLocalId ? { customerLocalId } : {}), phone: custPhone, date: dateString, time: timeString, status: status, statusColor: statusColor, total: total, items: [...db.cart] };
             db.invoices.push(order);
         }
         editingInvoiceId = null;
     } else {
         let orderId = db.invoices.length > 0 ? Math.max(...db.invoices.map(i => parseInt(i.id) || 1000)) + 1 : 1000;
-        order = { localId: createInvoiceLocalId(), id: orderId, customer: custName, phone: custPhone, date: dateString, time: timeString, status: status, statusColor: statusColor, total: total, items: [...db.cart] };
+        order = { localId: createInvoiceLocalId(), id: orderId, customer: custName, ...(customerLocalId ? { customerLocalId } : {}), phone: custPhone, date: dateString, time: timeString, status: status, statusColor: statusColor, total: total, items: [...db.cart] };
         db.invoices.push(order);
     }
     
@@ -2347,7 +2420,8 @@ function deleteInvoice(invoiceId) {
             }
             // Refresh ledger if open
             if (document.getElementById('customerLedgerModal').style.display === 'flex') {
-                openLedger(inv.customer);
+                const ledgerCustomer = db.customers.find(customer => invoiceBelongsToCustomer(inv, customer));
+                openLedger(ledgerCustomer ? ledgerCustomer.name : inv.customer, ledgerCustomer ? ledgerCustomer.id : undefined);
             }
             customAlert(navigator.onLine
                 ? 'تم حذف الفاتورة بنجاح.'
@@ -2390,8 +2464,11 @@ function editInvoice(invoiceId) {
 }
 
 function openLedger(name, custId) {
-    document.getElementById('ledger-name').innerText = name;
-    let custInvoices = db.invoices.filter(i => i.customer === name);
+    const customer = db.customers.find(item => item.id == custId) ||
+        db.customers.find(item => normalizeCustomerNameKey(item.name) === normalizeCustomerNameKey(name)) ||
+        { name, localId: '' };
+    document.getElementById('ledger-name').innerText = customer.name;
+    let custInvoices = db.invoices.filter(invoice => invoiceBelongsToCustomer(invoice, customer));
     let debt = custInvoices.filter(i => i.status !== "واصل").reduce((sum, i) => sum + i.total, 0);
     document.getElementById('ledger-debt').innerText = debt.toLocaleString() + " د.ع";
     
