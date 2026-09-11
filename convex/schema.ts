@@ -71,4 +71,10 @@ export default defineSchema({
   customers: defineTable(customerFields)
     .index("by_localId", ["localId"])
     .index("by_nameKey", ["nameKey"]),
+  productOrders: defineTable({
+    key: v.string(),
+    productLocalIds: v.array(v.string()),
+    productIds: v.array(v.number()),
+    updatedAt: v.number(),
+  }).index("by_key", ["key"]),
 });
