@@ -1,5 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '4.9.0';
+const APP_VERSION = '5.0.0';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
@@ -264,7 +264,7 @@ async function getPendingSyncItems() {
         const transaction = idb.transaction(IDB_SYNC_QUEUE_STORE, 'readonly');
         const request = transaction.objectStore(IDB_SYNC_QUEUE_STORE).getAll();
         request.onsuccess = () => resolve((request.result || [])
-            .filter(item => ['invoice', 'product', 'category', 'customer'].includes(item.type) && item.status === 'pending')
+            .filter(item => ['invoice', 'product', 'category', 'customer', 'productOrder'].includes(item.type) && item.status === 'pending')
             .sort((a, b) => {
                 const customerPriority = Number(b.type === 'customer') - Number(a.type === 'customer');
                 return customerPriority || String(a.createdAt).localeCompare(String(b.createdAt));
@@ -427,11 +427,43 @@ async function sendCustomerSyncItem(client, item) {
     throw new Error(`Unsupported customer sync action: ${item.action}`);
 }
 
+function normalizeProductOrderPayload(payload) {
+    return {
+        key: 'pos-product-order',
+        productLocalIds: [...new Set((Array.isArray(payload && payload.productLocalIds)
+            ? payload.productLocalIds
+            : []).map(String).filter(Boolean))],
+        productIds: (Array.isArray(payload && payload.productIds) ? payload.productIds : [])
+            .map(Number)
+            .filter(Number.isFinite),
+        updatedAt: Number(payload && payload.updatedAt || Date.now())
+    };
+}
+
+function resolveDownloadedProductOrder(payload) {
+    const normalized = normalizeProductOrderPayload(payload);
+    const productsByLocalId = new Map(db.products.map(product => [String(product.localId), product]));
+    const productsById = new Map(db.products.map(product => [Number(product.id), product]));
+    const resolved = normalized.productLocalIds.map((localId, index) =>
+        productsByLocalId.get(localId) || productsById.get(normalized.productIds[index])
+    );
+    return [...new Set(resolved.filter(Boolean).map(product => String(product.localId)))];
+}
+
+async function sendProductOrderSyncItem(client, item) {
+    if (!item.payload) throw new Error('Product order sync item is missing its payload');
+    return client.mutation(
+        convex.anyApi.productOrder.upsertProductOrder,
+        normalizeProductOrderPayload(item.payload)
+    );
+}
+
 async function sendSyncQueueItem(client, item) {
     if (item.type === 'invoice') return sendInvoiceSyncItem(client, item);
     if (item.type === 'product') return sendProductSyncItem(client, item);
     if (item.type === 'category') return sendCategorySyncItem(client, item);
     if (item.type === 'customer') return sendCustomerSyncItem(client, item);
+    if (item.type === 'productOrder') return sendProductOrderSyncItem(client, item);
     throw new Error(`Unsupported sync type: ${item.type}`);
 }
 
@@ -639,7 +671,7 @@ async function persistDownloadedCatalog(changedProducts) {
     });
 }
 
-async function mergeDownloadedCatalog(remoteProducts, remoteCategories, remoteInvoices, remoteCustomers, pendingItems) {
+async function mergeDownloadedCatalog(remoteProducts, remoteCategories, remoteInvoices, remoteCustomers, remoteProductOrder, pendingItems) {
     const pendingLocalIds = new Set(
         pendingItems
             .filter(item => item.status === 'pending' && ['product', 'category', 'invoice', 'customer'].includes(item.type))
@@ -649,6 +681,8 @@ async function mergeDownloadedCatalog(remoteProducts, remoteCategories, remoteIn
     const previousCategories = JSON.parse(JSON.stringify(db.categories));
     const previousInvoices = JSON.parse(JSON.stringify(db.invoices));
     const previousCustomers = JSON.parse(JSON.stringify(db.customers));
+    const previousProductOrder = [...db.posProductOrder];
+    const previousProductOrderUpdatedAt = Number(db.posProductOrderUpdatedAt || 0);
     const productsByLocalId = new Map(db.products.map(product => [product.localId, product]));
     const categoriesByLocalId = new Map(db.categories.map(category => [category.localId, category]));
     const invoicesByLocalId = new Map(db.invoices.map(invoice => [invoice.localId, invoice]));
@@ -705,6 +739,16 @@ async function mergeDownloadedCatalog(remoteProducts, remoteCategories, remoteIn
     });
 
     mergeDownloadedCustomers(remoteCustomers, pendingItems);
+    const hasPendingProductOrder = pendingItems.some(item =>
+        item.status === 'pending' && item.type === 'productOrder'
+    );
+    if (remoteProductOrder && !hasPendingProductOrder) {
+        const downloadedOrder = normalizeProductOrderPayload(remoteProductOrder);
+        if (downloadedOrder.updatedAt > Number(db.posProductOrderUpdatedAt || 0)) {
+            db.posProductOrder = resolveDownloadedProductOrder(downloadedOrder);
+            db.posProductOrderUpdatedAt = downloadedOrder.updatedAt;
+        }
+    }
     const blockedCustomerNameKeys = new Set([
         ...remoteCustomers
             .filter(customer => customer && customer.isDeleted)
@@ -726,6 +770,8 @@ async function mergeDownloadedCatalog(remoteProducts, remoteCategories, remoteIn
         db.categories = previousCategories;
         db.invoices = previousInvoices;
         db.customers = previousCustomers;
+        db.posProductOrder = previousProductOrder;
+        db.posProductOrderUpdatedAt = previousProductOrderUpdatedAt;
         throw error;
     }
 }
@@ -736,15 +782,23 @@ async function downloadCatalogFromConvex() {
     try {
         if (!globalThis.CONVEX_URL || !globalThis.convex || !convex.ConvexHttpClient) return false;
         const client = new convex.ConvexHttpClient(globalThis.CONVEX_URL);
-        const [remoteProducts, remoteCategories, remoteInvoices, remoteCustomers] = await Promise.all([
+        const [remoteProducts, remoteCategories, remoteInvoices, remoteCustomers, remoteProductOrder] = await Promise.all([
             client.query(convex.anyApi.products.getProducts, { limit: 5000 }),
             client.query(convex.anyApi.categories.getCategories, { limit: 5000 }),
             client.query(convex.anyApi.invoices.getInvoices, { limit: 5000 }),
-            client.query(convex.anyApi.customers.getCustomers, { limit: 5000 })
+            client.query(convex.anyApi.customers.getCustomers, { limit: 5000 }),
+            client.query(convex.anyApi.productOrder.getProductOrder, { key: 'pos-product-order' })
         ]);
         if (![remoteProducts, remoteCategories, remoteInvoices, remoteCustomers].every(Array.isArray)) return false;
         const pendingItems = await getPendingSyncItems();
-        await mergeDownloadedCatalog(remoteProducts, remoteCategories, remoteInvoices, remoteCustomers, pendingItems);
+        await mergeDownloadedCatalog(
+            remoteProducts,
+            remoteCategories,
+            remoteInvoices,
+            remoteCustomers,
+            remoteProductOrder,
+            pendingItems
+        );
         return true;
     } catch (error) {
         console.warn('تعذر تنزيل بيانات Convex، وسيستمر استخدام البيانات المحلية.', error);
@@ -755,7 +809,15 @@ async function downloadCatalogFromConvex() {
 }
 
 // قاعدة بيانات تتضمن الفئات الآن
-let db = { products: [], customers: [], cart: [], invoices: [], categories: [], posProductOrder: [] };
+let db = {
+    products: [],
+    customers: [],
+    cart: [],
+    invoices: [],
+    categories: [],
+    posProductOrder: [],
+    posProductOrderUpdatedAt: 0
+};
 
 // استرجاع البيانات من التخزين المحلي (التحديث لاستخدام IndexedDB مع دعم نقل القديم)
 async function loadAppDatabase() {
@@ -779,6 +841,7 @@ async function loadAppDatabase() {
             db.cart = savedDb.cart || [];
             db.invoices = savedDb.invoices || [];
             db.posProductOrder = Array.isArray(savedDb.posProductOrder) ? savedDb.posProductOrder : [];
+            db.posProductOrderUpdatedAt = Number(savedDb.posProductOrderUpdatedAt || 0);
             db.categories = (savedDb.categories || []).map(category => ({
                 ...category,
                 localId: category.localId || createLocalId('category'),
@@ -1571,8 +1634,8 @@ function getOrderedPosProducts() {
     const savedOrder = Array.isArray(db.posProductOrder) ? db.posProductOrder.map(String) : [];
     const orderIndex = new Map(savedOrder.map((id, index) => [id, index]));
     return [...db.products].sort((first, second) => {
-        const firstOrder = orderIndex.has(String(first.id)) ? orderIndex.get(String(first.id)) : Number.MAX_SAFE_INTEGER;
-        const secondOrder = orderIndex.has(String(second.id)) ? orderIndex.get(String(second.id)) : Number.MAX_SAFE_INTEGER;
+        const firstOrder = orderIndex.get(String(first.localId)) ?? orderIndex.get(String(first.id)) ?? Number.MAX_SAFE_INTEGER;
+        const secondOrder = orderIndex.get(String(second.localId)) ?? orderIndex.get(String(second.id)) ?? Number.MAX_SAFE_INTEGER;
         if (firstOrder !== secondOrder) return firstOrder - secondOrder;
         return db.products.indexOf(first) - db.products.indexOf(second);
     });
@@ -1592,18 +1655,47 @@ function applyProductOrderToSalesGrid() {
     });
 }
 
-function saveAdminProductOrder() {
+async function saveAdminProductOrder() {
     const adminGrid = document.getElementById('admin-products-grid');
     if (!adminGrid) return;
-    const orderedIds = [...adminGrid.querySelectorAll('.admin-product-card')]
-        .map(card => String(card.dataset.productId));
-    const orderedSet = new Set(orderedIds);
-    const missingIds = getOrderedPosProducts()
-        .map(product => String(product.id))
-        .filter(id => !orderedSet.has(id));
-    db.posProductOrder = [...orderedIds, ...missingIds];
-    saveLocal();
+    const previousOrder = [...db.posProductOrder];
+    const previousUpdatedAt = Number(db.posProductOrderUpdatedAt || 0);
+    const productsById = new Map(db.products.map(product => [String(product.id), product]));
+    const orderedLocalIds = [...adminGrid.querySelectorAll('.admin-product-card')]
+        .map(card => productsById.get(String(card.dataset.productId)))
+        .filter(Boolean)
+        .map(product => String(product.localId));
+    const orderedSet = new Set(orderedLocalIds);
+    const missingLocalIds = getOrderedPosProducts()
+        .map(product => String(product.localId))
+        .filter(localId => !orderedSet.has(localId));
+    db.posProductOrder = [...orderedLocalIds, ...missingLocalIds];
+    db.posProductOrderUpdatedAt = Date.now();
+    const productsByLocalId = new Map(db.products.map(product => [String(product.localId), product]));
+    const orderedProductIds = db.posProductOrder
+        .map(localId => productsByLocalId.get(localId))
+        .filter(Boolean)
+        .map(product => Number(product.id));
     applyProductOrderToSalesGrid();
+    try {
+        await saveAppDataAndQueueOperation(
+            'productOrder',
+            'pos-product-order',
+            'upsert',
+            normalizeProductOrderPayload({
+                productLocalIds: db.posProductOrder,
+                productIds: orderedProductIds,
+                updatedAt: db.posProductOrderUpdatedAt
+            })
+        );
+        syncChangesIfOnline();
+    } catch (error) {
+        db.posProductOrder = previousOrder;
+        db.posProductOrderUpdatedAt = previousUpdatedAt;
+        renderProducts();
+        console.error('تعذر حفظ ترتيب المنتجات محليًا.', error);
+        customAlert('تعذر حفظ ترتيب المنتجات. حاول مرة أخرى.');
+    }
 }
 
 function moveAdminProductCard(event) {
