@@ -2450,8 +2450,199 @@ async function deleteOrderFromDetails(order) {
     }
 }
 
-function exportToPDF(order) {
+function invoicePdfText(value) {
+    return String(value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function fitInvoicePdfText(ctx, value, maxWidth) {
+    const text = invoicePdfText(value);
+    if (ctx.measureText(text).width <= maxWidth) return text;
+    let shortened = text;
+    while (shortened.length > 1 && ctx.measureText(`…${shortened}`).width > maxWidth) {
+        shortened = shortened.slice(0, -1);
+    }
+    return `${shortened}…`;
+}
+
+function drawInvoicePdfPage(order, pageItems, pageNumber, pageCount, isLastPage) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 1240;
+    canvas.height = 1754;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.direction = 'rtl';
+    ctx.textBaseline = 'middle';
+
+    ctx.fillStyle = '#111111';
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 38px Arial, sans-serif';
+    ctx.fillText('مكتب الجوهرة للتجارة للحلويات والمشروبات', canvas.width / 2, 85);
+    ctx.font = '25px Arial, sans-serif';
+    ctx.fillText('بإدارة: حسين — العنوان: ميسان', canvas.width / 2, 135);
+    ctx.fillText('07735277518  |  07744090022', canvas.width / 2, 175);
+
+    ctx.strokeStyle = '#b7b7b7';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(70, 215);
+    ctx.lineTo(1170, 215);
+    ctx.stroke();
+
+    ctx.font = 'bold 34px Arial, sans-serif';
+    ctx.fillText('فاتورة مبيعات', canvas.width / 2, 265);
+    ctx.font = '25px Arial, sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(`رقم الفاتورة: ${invoicePdfText(order.id)}`, 1160, 320);
+    ctx.fillText(`العميل: ${invoicePdfText(order.customer)}`, 1160, 365);
+    ctx.textAlign = 'left';
+    ctx.fillText(`التاريخ: ${invoicePdfText(order.date)} - ${invoicePdfText(order.time)}`, 80, 320);
+    ctx.fillText(`الصفحة: ${pageNumber} / ${pageCount}`, 80, 365);
+
+    const tableTop = 415;
+    const rowHeight = 70;
+    const columns = [70, 150, 665, 790, 980, 1170];
+    ctx.fillStyle = '#eeeeee';
+    ctx.fillRect(columns[0], tableTop, columns[columns.length - 1] - columns[0], rowHeight);
+    ctx.strokeStyle = '#9a9a9a';
+    ctx.strokeRect(columns[0], tableTop, columns[columns.length - 1] - columns[0], rowHeight);
+    columns.slice(1, -1).forEach(x => {
+        ctx.beginPath();
+        ctx.moveTo(x, tableTop);
+        ctx.lineTo(x, tableTop + rowHeight * (pageItems.length + 1));
+        ctx.stroke();
+    });
+
+    ctx.fillStyle = '#111111';
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 24px Arial, sans-serif';
+    const headers = ['ت', 'الصنف', 'الكمية', 'السعر', 'الإجمالي'];
+    headers.forEach((header, index) => {
+        ctx.fillText(header, (columns[index] + columns[index + 1]) / 2, tableTop + rowHeight / 2);
+    });
+
+    ctx.font = '23px Arial, sans-serif';
+    pageItems.forEach((item, index) => {
+        const y = tableTop + rowHeight * (index + 1);
+        ctx.fillStyle = index % 2 === 0 ? '#ffffff' : '#fafafa';
+        ctx.fillRect(columns[0], y, columns[columns.length - 1] - columns[0], rowHeight);
+        ctx.strokeStyle = '#c7c7c7';
+        ctx.strokeRect(columns[0], y, columns[columns.length - 1] - columns[0], rowHeight);
+        ctx.fillStyle = '#111111';
+
+        const itemNumber = (pageNumber - 1) * 14 + index + 1;
+        const halfLabel = isInvoiceItemHalfCarton(item) ? ' (نصف كارتون)' : '';
+        const noteLabel = item.note ? ` - ${item.note}` : '';
+        const values = [
+            itemNumber,
+            fitInvoicePdfText(ctx, `${item.name}${halfLabel}${noteLabel}`, columns[2] - columns[1] - 24),
+            item.qty,
+            Number(item.price || 0).toLocaleString(),
+            (Number(item.price || 0) * Number(item.qty || 0)).toLocaleString()
+        ];
+        values.forEach((value, valueIndex) => {
+            ctx.fillText(value, (columns[valueIndex] + columns[valueIndex + 1]) / 2, y + rowHeight / 2);
+        });
+    });
+
+    if (isLastPage) {
+        const summaryY = tableTop + rowHeight * (pageItems.length + 1) + 65;
+        ctx.textAlign = 'right';
+        ctx.font = 'bold 30px Arial, sans-serif';
+        ctx.fillStyle = '#159447';
+        ctx.fillText(`الإجمالي الكلي: ${Number(order.total || 0).toLocaleString()} د.ع`, 1160, summaryY);
+        ctx.fillStyle = '#111111';
+        ctx.font = '26px Arial, sans-serif';
+        ctx.fillText(`حالة الدفع: ${invoicePdfText(order.status)}`, 1160, summaryY + 55);
+    }
+
+    ctx.fillStyle = '#777777';
+    ctx.textAlign = 'center';
+    ctx.font = '21px Arial, sans-serif';
+    ctx.fillText(`فاتورة #${invoicePdfText(order.id)}`, canvas.width / 2, canvas.height - 45);
+    return canvas;
+}
+
+function invoiceCanvasToJpegBytes(canvas) {
+    const encoded = canvas.toDataURL('image/jpeg', 0.92).split(',')[1];
+    const binary = atob(encoded);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+}
+
+function createInvoicePdfBlob(order) {
+    const items = Array.isArray(order.items) ? order.items : [];
+    const itemPages = [];
+    for (let i = 0; i < Math.max(items.length, 1); i += 14) itemPages.push(items.slice(i, i + 14));
+    const canvases = itemPages.map((pageItems, index) => drawInvoicePdfPage(
+        order,
+        pageItems,
+        index + 1,
+        itemPages.length,
+        index === itemPages.length - 1
+    ));
+    const jpegPages = canvases.map(canvas => ({
+        width: canvas.width,
+        height: canvas.height,
+        bytes: invoiceCanvasToJpegBytes(canvas)
+    }));
+    const encoder = new TextEncoder();
+    const ascii = value => encoder.encode(value);
+    const objectCount = 2 + jpegPages.length * 3;
+    const objects = new Array(objectCount + 1);
+    objects[1] = ascii('<< /Type /Catalog /Pages 2 0 R >>');
+    const pageRefs = jpegPages.map((_, index) => `${3 + index * 3} 0 R`).join(' ');
+    objects[2] = ascii(`<< /Type /Pages /Kids [${pageRefs}] /Count ${jpegPages.length} >>`);
+
+    jpegPages.forEach((page, index) => {
+        const pageObject = 3 + index * 3;
+        const imageObject = pageObject + 1;
+        const contentObject = pageObject + 2;
+        const content = ascii('q\n595.28 0 0 841.89 0 0 cm\n/Im0 Do\nQ');
+        objects[pageObject] = ascii(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595.28 841.89] /Resources << /XObject << /Im0 ${imageObject} 0 R >> >> /Contents ${contentObject} 0 R >>`);
+        objects[imageObject] = [
+            ascii(`<< /Type /XObject /Subtype /Image /Width ${page.width} /Height ${page.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${page.bytes.length} >>\nstream\n`),
+            page.bytes,
+            ascii('\nendstream')
+        ];
+        objects[contentObject] = [
+            ascii(`<< /Length ${content.length} >>\nstream\n`),
+            content,
+            ascii('\nendstream')
+        ];
+    });
+
+    const chunks = [ascii('%PDF-1.4\n%1234\n')];
+    const offsets = new Array(objectCount + 1).fill(0);
+    let byteLength = chunks[0].length;
+    const append = chunk => {
+        chunks.push(chunk);
+        byteLength += chunk.length;
+    };
+    for (let id = 1; id <= objectCount; id += 1) {
+        offsets[id] = byteLength;
+        append(ascii(`${id} 0 obj\n`));
+        const bodyChunks = Array.isArray(objects[id]) ? objects[id] : [objects[id]];
+        bodyChunks.forEach(append);
+        append(ascii('\nendobj\n'));
+    }
+    const xrefOffset = byteLength;
+    append(ascii(`xref\n0 ${objectCount + 1}\n`));
+    append(ascii('0000000000 65535 f \n'));
+    for (let id = 1; id <= objectCount; id += 1) {
+        append(ascii(`${String(offsets[id]).padStart(10, '0')} 00000 n \n`));
+    }
+    append(ascii(`trailer\n<< /Size ${objectCount + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`));
+    return new Blob(chunks, { type: 'application/pdf' });
+}
+
+function openInvoicePrintDialog(order) {
     let printWindow = window.open('', '_blank'); let itemsRows = "";
+    if (!printWindow) {
+        customAlert('تعذر فتح معاينة الفاتورة. يرجى السماح بالنوافذ المنبثقة ثم المحاولة مجددًا.');
+        return;
+    }
     order.items.forEach((item, i) => { itemsRows += `<tr><td style="border:1px solid #ddd; padding:8px;">${i+1}</td><td style="border:1px solid #ddd; padding:8px;">${item.name}${isInvoiceItemHalfCarton(item) ? '<br><strong>نصف كارتون</strong>' : ''}${item.note ? `<br><span style="font-size:11px; color:#555;">${item.note}</span>` : ''}</td><td style="border:1px solid #ddd; padding:8px;">${item.qty}</td><td style="border:1px solid #ddd; padding:8px;">${item.price.toLocaleString()}</td><td style="border:1px solid #ddd; padding:8px;">${(item.price * item.qty).toLocaleString()}</td></tr>`; });
 
     let html = `
@@ -2460,15 +2651,24 @@ function exportToPDF(order) {
         <title>فاتورة #${order.id}</title>
         <style> 
             body{font-family: Arial, sans-serif; padding:20px; font-size: 14px;} 
+            .preview-actions{position:sticky; top:0; z-index:10; display:flex; gap:10px; padding:10px; margin:-10px -10px 20px; background:rgba(255,255,255,.96); box-shadow:0 2px 10px rgba(0,0,0,.12);}
+            .preview-actions button{flex:1; border:0; border-radius:10px; padding:13px 10px; color:#fff; font:700 16px Arial,sans-serif; cursor:pointer;}
+            .share-button{background:#21b861;}
+            .print-button{background:#087fce;}
             .header-info { text-align: center; margin-bottom: 20px; }
             .header-info h1 { margin: 0; font-size: 24px; }
             .header-info p { margin: 5px 0; }
             table{width:100%; border-collapse:collapse; margin-top:20px; text-align:center;} 
             th{background:#f2f2f2; border:1px solid #ddd; padding:10px;} 
             td{border:1px solid #ddd; padding:8px;}
+            @media print{.preview-actions{display:none;} body{padding:0;}}
         </style>
     </head>
-    <body onload="window.print();">
+    <body>
+        <div class="preview-actions">
+            <button type="button" class="share-button" id="shareInvoiceButton">مشاركة PDF</button>
+            <button type="button" class="print-button" onclick="window.print()">طباعة / حفظ PDF</button>
+        </div>
         <div class="header-info">
             <h1>مكتب الجوهرة للتجارة لحلويات والمشروبات</h1>
             <p>بإدارة: حسين</p>
@@ -2483,7 +2683,39 @@ function exportToPDF(order) {
         <h3 style="text-align:left; margin-top:20px;">الإجمالي الكلي: ${order.total.toLocaleString()} د.ع</h3>
         <p style="text-align:left;">حالة الدفع: ${order.status}</p>
     </body></html>`;
-    printWindow.document.write(html); printWindow.document.close();
+    printWindow.document.write(html);
+    printWindow.document.close();
+    printWindow.document.getElementById('shareInvoiceButton').onclick = () => shareInvoicePdf(order, printWindow);
+}
+
+function shareInvoicePdf(order, previewWindow = window) {
+    try {
+        const pdfBlob = createInvoicePdfBlob(order);
+        const safeInvoiceId = invoicePdfText(order.id).replace(/[^\w\u0600-\u06FF-]+/g, '-');
+        const PreviewFile = previewWindow.File || File;
+        const pdfFile = new PreviewFile([pdfBlob], `invoice-${safeInvoiceId || 'sale'}.pdf`, { type: 'application/pdf' });
+        const shareData = {
+            title: `فاتورة #${invoicePdfText(order.id)}`,
+            text: `فاتورة العميل ${invoicePdfText(order.customer)}`,
+            files: [pdfFile]
+        };
+        const previewNavigator = previewWindow.navigator;
+        if (previewNavigator.share && previewNavigator.canShare && previewNavigator.canShare({ files: [pdfFile] })) {
+            previewNavigator.share(shareData).catch(error => {
+                if (error && error.name === 'AbortError') return;
+                console.error('تعذرت مشاركة ملف الفاتورة.', error);
+                previewWindow.alert('تعذرت المشاركة. يمكنك استخدام زر طباعة / حفظ PDF.');
+            });
+            return;
+        }
+    } catch (error) {
+        console.error('تعذر إنشاء ملف PDF للمشاركة.', error);
+    }
+    previewWindow.alert('هذا الجهاز أو المتصفح لا يدعم مشاركة ملفات PDF. استخدم زر طباعة / حفظ PDF.');
+}
+
+function exportToPDF(order) {
+    openInvoicePrintDialog(order);
 }
 
 function shareWhatsApp(order) {
