@@ -1,4 +1,4 @@
-const CACHE_NAME = 'pos-offline-v40';
+const CACHE_NAME = 'pos-offline-v41';
 const PRODUCT_IMAGES_CACHE = 'pos-product-images-v1';
 const urlsToCache = [
     './',
