@@ -64,6 +64,18 @@ export const customerFields = {
   isDeleted: v.optional(v.boolean()),
 };
 
+export const paymentFields = {
+  localId: v.string(),
+  id: v.number(),
+  customerLocalId: v.string(),
+  customerName: v.string(),
+  amount: v.number(),
+  date: v.string(),
+  time: v.string(),
+  updatedAt: v.number(),
+  isDeleted: v.optional(v.boolean()),
+};
+
 export default defineSchema({
   invoices: defineTable(invoiceFields).index("by_localId", ["localId"]),
   products: defineTable(productFields).index("by_localId", ["localId"]),
@@ -71,6 +83,9 @@ export default defineSchema({
   customers: defineTable(customerFields)
     .index("by_localId", ["localId"])
     .index("by_nameKey", ["nameKey"]),
+  payments: defineTable(paymentFields)
+    .index("by_localId", ["localId"])
+    .index("by_customerLocalId", ["customerLocalId"]),
   productOrders: defineTable({
     key: v.string(),
     productLocalIds: v.array(v.string()),

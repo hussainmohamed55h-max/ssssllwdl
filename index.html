@@ -11,7 +11,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="style.css?v=2.9">
+    <link rel="stylesheet" href="style.css?v=3.0">
 </head>
 <body class="light-mode">
 
@@ -67,6 +67,17 @@
                 </div>
         </section>
 
+        <section id="tab-settlements" class="tab-content">
+            <div class="settlement-search-box">
+                <label for="settlementCustomerSearch"><i class="fas fa-magnifying-glass"></i> ابحث عن اسم الزبون</label>
+                <input type="search" id="settlementCustomerSearch" placeholder="اكتب من أول حرف..." autocomplete="off" oninput="renderSettlementCustomers()">
+            </div>
+            <div id="settlementCustomerResults" class="settlement-customer-results"></div>
+            <div id="settlementWorkspace" class="settlement-workspace">
+                <div class="settlement-empty-state"><i class="fas fa-hand-holding-dollar"></i><p>اختر زبوناً لعرض الدين والتسديدات.</p></div>
+            </div>
+        </section>
+
         <section id="tab-settings" class="tab-content">
             <h2 style="margin-bottom: 20px; text-align: center;">الإعدادات والأمان</h2>
             <div style="display: flex; flex-direction: column; gap: 15px;">
@@ -96,6 +107,9 @@
         </div>
         <div class="nav-item" onclick="triggerFlip(this, () => switchTab('tab-customers', this))">
             <i class="fas fa-users"></i><span>الزبائن</span>
+        </div>
+        <div class="nav-item" onclick="triggerFlip(this, () => switchTab('tab-settlements', this))">
+            <i class="fas fa-hand-holding-dollar"></i><span>التسديد</span>
         </div>
         <div class="nav-item" onclick="triggerFlip(this, () => switchTab('tab-settings', this))">
             <i class="fas fa-cog"></i><span>الإعدادات</span>
@@ -254,6 +268,21 @@
         </div>
     </div>
 
+    <div id="settlementPaymentModal" class="modal">
+        <div class="modal-content settlement-payment-modal">
+            <span class="close-btn" onclick="closeModal('settlementPaymentModal')"><i class="fas fa-times"></i></span>
+            <h2 id="settlementPaymentModalTitle">تسديد دين</h2>
+            <input type="hidden" id="editSettlementPaymentId" value="">
+            <div class="settlement-modal-customer" id="settlementModalCustomer"></div>
+            <div class="input-group">
+                <label for="settlementAmount">المبلغ بالدينار العراقي</label>
+                <input type="text" id="settlementAmount" inputmode="numeric" autocomplete="off" placeholder="مثال: 250,000">
+                <small id="settlementPaymentLimit"></small>
+            </div>
+            <button class="btn-3d" type="button" onclick="saveSettlementPayment()"><i class="fas fa-floppy-disk"></i> حفظ التسديد</button>
+        </div>
+    </div>
+
     <div id="customAlertModal" class="modal" style="z-index: 9999;">
         <div class="modal-content" style="max-width: 300px; text-align: center; border-color: var(--primary-green);">
             <div style="font-size: 40px; color: var(--primary-green); margin-bottom: 10px;"><i class="fas fa-bell"></i></div>
@@ -358,7 +387,8 @@
         });
     </script>
     <script src="./vendor/convex.browser.bundle.js"></script>
+    <script src="./vendor/html2canvas.min.js"></script>
     <script src="./convex-config.js"></script>
-    <script src="script.js?v=5.1.1"></script>
+    <script src="script.js?v=5.2.0"></script>
 </body>
 </html>

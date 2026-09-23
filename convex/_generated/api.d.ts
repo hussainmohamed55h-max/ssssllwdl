@@ -13,6 +13,7 @@ import type * as customers from "../customers.js";
 import type * as files from "../files.js";
 import type * as health from "../health.js";
 import type * as invoices from "../invoices.js";
+import type * as payments from "../payments.js";
 import type * as productOrder from "../productOrder.js";
 import type * as products from "../products.js";
 
@@ -28,6 +29,7 @@ declare const fullApi: ApiFromModules<{
   files: typeof files;
   health: typeof health;
   invoices: typeof invoices;
+  payments: typeof payments;
   productOrder: typeof productOrder;
   products: typeof products;
 }>;

@@ -1,14 +1,15 @@
-const CACHE_NAME = 'pos-offline-v42';
+const CACHE_NAME = 'pos-offline-v43';
 const PRODUCT_IMAGES_CACHE = 'pos-product-images-v1';
 const urlsToCache = [
     './',
     './index.html',
     './manifest.json',
-    './style.css?v=2.9',
-    './script.js?v=5.1.1',
+    './style.css?v=3.0',
+    './script.js?v=5.2.0',
     './version.json',
     './convex-config.js',
     './vendor/convex.browser.bundle.js',
+    './vendor/html2canvas.min.js',
     './icon-192.png',
     './icon-512.png',
     'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css',

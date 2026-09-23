@@ -1,5 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '5.1.1';
+const APP_VERSION = '5.2.0';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
@@ -142,6 +142,15 @@ function normalizeCustomerNameKey(name) {
     return String(name || '').trim().replace(/\s+/g, ' ').toLocaleLowerCase('ar');
 }
 
+function normalizeCustomerSearchText(name) {
+    return String(name || '')
+        .normalize('NFKC')
+        .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/gi, '')
+        .trim()
+        .replace(/\s+/g, ' ')
+        .toLocaleLowerCase('ar');
+}
+
 function normalizeCustomerForStorage(customer) {
     const name = String(customer && customer.name || '').trim().replace(/\s+/g, ' ');
     return {
@@ -153,6 +162,20 @@ function normalizeCustomerForStorage(customer) {
         address: String(customer && customer.address || ''),
         updatedAt: Number(customer && customer.updatedAt || customer && customer.id || 0),
         ...(customer && customer.isDeleted ? { isDeleted: true } : {})
+    };
+}
+
+function normalizePaymentForStorage(payment) {
+    return {
+        localId: String(payment && payment.localId || createLocalId('payment')),
+        id: Number(payment && payment.id || Date.now()),
+        customerLocalId: String(payment && payment.customerLocalId || ''),
+        customerName: String(payment && payment.customerName || '').trim(),
+        amount: Math.max(0, Math.round(Number(payment && payment.amount || 0))),
+        date: String(payment && payment.date || ''),
+        time: String(payment && payment.time || ''),
+        updatedAt: Number(payment && payment.updatedAt || Date.now()),
+        ...(payment && payment.isDeleted ? { isDeleted: true } : {})
     };
 }
 
@@ -264,7 +287,7 @@ async function getPendingSyncItems() {
         const transaction = idb.transaction(IDB_SYNC_QUEUE_STORE, 'readonly');
         const request = transaction.objectStore(IDB_SYNC_QUEUE_STORE).getAll();
         request.onsuccess = () => resolve((request.result || [])
-            .filter(item => ['invoice', 'product', 'category', 'customer', 'productOrder'].includes(item.type) && item.status === 'pending')
+            .filter(item => ['invoice', 'product', 'category', 'customer', 'payment', 'productOrder'].includes(item.type) && item.status === 'pending')
             .sort((a, b) => {
                 const customerPriority = Number(b.type === 'customer') - Number(a.type === 'customer');
                 return customerPriority || String(a.createdAt).localeCompare(String(b.createdAt));
@@ -427,6 +450,19 @@ async function sendCustomerSyncItem(client, item) {
     throw new Error(`Unsupported customer sync action: ${item.action}`);
 }
 
+async function sendPaymentSyncItem(client, item) {
+    if (!item.payload || !item.payload.localId) throw new Error('Payment sync item is missing localId');
+    const payload = normalizePaymentForStorage({
+        ...item.payload,
+        ...(item.action === 'delete' ? { isDeleted: true } : {})
+    });
+    if (item.action === 'create' || item.action === 'update') {
+        return client.mutation(convex.anyApi.payments.upsertPayment, payload);
+    }
+    if (item.action === 'delete') return client.mutation(convex.anyApi.payments.deletePayment, payload);
+    throw new Error(`Unsupported payment sync action: ${item.action}`);
+}
+
 function normalizeProductOrderPayload(payload) {
     return {
         key: 'pos-product-order',
@@ -463,6 +499,7 @@ async function sendSyncQueueItem(client, item) {
     if (item.type === 'product') return sendProductSyncItem(client, item);
     if (item.type === 'category') return sendCategorySyncItem(client, item);
     if (item.type === 'customer') return sendCustomerSyncItem(client, item);
+    if (item.type === 'payment') return sendPaymentSyncItem(client, item);
     if (item.type === 'productOrder') return sendProductOrderSyncItem(client, item);
     throw new Error(`Unsupported sync type: ${item.type}`);
 }
@@ -671,7 +708,7 @@ async function persistDownloadedCatalog(changedProducts) {
     });
 }
 
-async function mergeDownloadedCatalog(remoteProducts, remoteCategories, remoteInvoices, remoteCustomers, remoteProductOrder, pendingItems) {
+async function mergeDownloadedCatalog(remoteProducts, remoteCategories, remoteInvoices, remoteCustomers, remotePayments, remoteProductOrder, pendingItems) {
     const pendingLocalIds = new Set(
         pendingItems
             .filter(item => item.status === 'pending' && ['product', 'category', 'invoice', 'customer'].includes(item.type))
@@ -681,6 +718,7 @@ async function mergeDownloadedCatalog(remoteProducts, remoteCategories, remoteIn
     const previousCategories = JSON.parse(JSON.stringify(db.categories));
     const previousInvoices = JSON.parse(JSON.stringify(db.invoices));
     const previousCustomers = JSON.parse(JSON.stringify(db.customers));
+    const previousPayments = JSON.parse(JSON.stringify(db.payments));
     const previousProductOrder = [...db.posProductOrder];
     const previousProductOrderUpdatedAt = Number(db.posProductOrderUpdatedAt || 0);
     const productsByLocalId = new Map(db.products.map(product => [product.localId, product]));
@@ -739,6 +777,7 @@ async function mergeDownloadedCatalog(remoteProducts, remoteCategories, remoteIn
     });
 
     mergeDownloadedCustomers(remoteCustomers, pendingItems);
+    mergeDownloadedPayments(remotePayments, pendingItems);
     const hasPendingProductOrder = pendingItems.some(item =>
         item.status === 'pending' && item.type === 'productOrder'
     );
@@ -770,6 +809,7 @@ async function mergeDownloadedCatalog(remoteProducts, remoteCategories, remoteIn
         db.categories = previousCategories;
         db.invoices = previousInvoices;
         db.customers = previousCustomers;
+        db.payments = previousPayments;
         db.posProductOrder = previousProductOrder;
         db.posProductOrderUpdatedAt = previousProductOrderUpdatedAt;
         throw error;
@@ -782,11 +822,15 @@ async function downloadCatalogFromConvex() {
     try {
         if (!globalThis.CONVEX_URL || !globalThis.convex || !convex.ConvexHttpClient) return false;
         const client = new convex.ConvexHttpClient(globalThis.CONVEX_URL);
-        const [remoteProducts, remoteCategories, remoteInvoices, remoteCustomers, remoteProductOrder] = await Promise.all([
+        const [remoteProducts, remoteCategories, remoteInvoices, remoteCustomers, remotePayments, remoteProductOrder] = await Promise.all([
             client.query(convex.anyApi.products.getProducts, { limit: 5000 }),
             client.query(convex.anyApi.categories.getCategories, { limit: 5000 }),
             client.query(convex.anyApi.invoices.getInvoices, { limit: 5000 }),
             client.query(convex.anyApi.customers.getCustomers, { limit: 5000 }),
+            client.query(convex.anyApi.payments.getPayments, { limit: 5000 }).catch(error => {
+                console.warn('واجهة مزامنة التسديدات غير منشورة بعد؛ ستبقى البيانات المحلية محفوظة.', error);
+                return null;
+            }),
             client.query(convex.anyApi.productOrder.getProductOrder, { key: 'pos-product-order' })
         ]);
         if (![remoteProducts, remoteCategories, remoteInvoices, remoteCustomers].every(Array.isArray)) return false;
@@ -796,6 +840,7 @@ async function downloadCatalogFromConvex() {
             remoteCategories,
             remoteInvoices,
             remoteCustomers,
+            remotePayments,
             remoteProductOrder,
             pendingItems
         );
@@ -814,6 +859,7 @@ let db = {
     customers: [],
     cart: [],
     invoices: [],
+    payments: [],
     categories: [],
     posProductOrder: [],
     posProductOrderUpdatedAt: 0
@@ -840,6 +886,9 @@ async function loadAppDatabase() {
                 .filter(customer => customer.name);
             db.cart = savedDb.cart || [];
             db.invoices = savedDb.invoices || [];
+            db.payments = (savedDb.payments || [])
+                .map(normalizePaymentForStorage)
+                .filter(payment => payment.amount > 0);
             db.posProductOrder = Array.isArray(savedDb.posProductOrder) ? savedDb.posProductOrder : [];
             db.posProductOrderUpdatedAt = Number(savedDb.posProductOrderUpdatedAt || 0);
             db.categories = (savedDb.categories || []).map(category => ({
@@ -871,7 +920,7 @@ async function loadAppDatabase() {
     } catch(e) { console.error("خطأ في قراءة البيانات", e); }
 
     // التشغيل المبدئي للواجهة بعد اكتمال تحميل البيانات
-    renderCategories(); renderProducts(); renderCustomers(); updateCartCustomerSelect(); updateCartUI();
+    renderCategories(); renderProducts(); renderCustomers(); renderSettlementsTab(); updateCartCustomerSelect(); updateCartUI();
 }
 
 // دالة لحفظ أي تغيير جديد محلياً فوراً (تم التحديث لـ IndexedDB)
@@ -910,6 +959,7 @@ function switchTab(tabId, navElement) {
     document.getElementById(tabId).classList.add('active');
     if(navElement) navElement.classList.add('active');
     if (tabId === 'tab-customers') renderCustomers();
+    if (tabId === 'tab-settlements') renderSettlementsTab();
     if (tabId === 'tab-settings') checkForAppUpdate(true);
 }
 function triggerFlip(btn, callback) {
@@ -1170,8 +1220,10 @@ let imgPanX = 0;
 let imgPanY = 0;
 
 const PRODUCT_IMAGE_PLACEHOLDER = 'https://placehold.co/400x400/2a2a2a/ffffff/png?text=No+Image';
-const PRODUCT_IMAGE_MAX_DIMENSION = 800;
-const PRODUCT_IMAGE_WEBP_QUALITY = 0.86;
+// Cards are rendered far below this size. Keeping a 640px source preserves
+// sharpness on tablets while reducing upload, download and cache traffic.
+const PRODUCT_IMAGE_MAX_DIMENSION = 640;
+const PRODUCT_IMAGE_WEBP_QUALITY = 0.80;
 
 function getProductImageUrl(product) {
     let imageUrl = product.thumbUrl && typeof product.thumbUrl === 'string' && !product.thumbUrl.startsWith('data:')
@@ -1759,25 +1811,6 @@ function startAdminProductDrag(event, productId) {
     window.addEventListener('pointercancel', finishAdminProductDrag);
 }
 
-let lastOfflineImageCacheSignature = '';
-
-function cacheProductImagesForOffline() {
-    if (!navigator.onLine || !('serviceWorker' in navigator) || db.products.length === 0) return;
-    const imageUrls = [...new Set(db.products.flatMap(product => [
-        getProductImageUrl(product),
-        getProductMediumImageUrl(product)
-    ]).filter(url => url && url !== PRODUCT_IMAGE_PLACEHOLDER))];
-    const signature = imageUrls.join('|');
-    if (!signature || signature === lastOfflineImageCacheSignature) return;
-
-    navigator.serviceWorker.ready.then(registration => {
-        const worker = registration.active || navigator.serviceWorker.controller;
-        if (!worker) return;
-        worker.postMessage({ type: 'CACHE_PRODUCT_IMAGES', urls: imageUrls });
-        lastOfflineImageCacheSignature = signature;
-    }).catch(error => console.warn('تعذر تجهيز صور المنتجات للعمل دون إنترنت.', error));
-}
-
 let activeProductSearch = '';
 
 function normalizeProductSearch(value) {
@@ -1898,7 +1931,6 @@ function renderProducts() {
 
     posGrid.innerHTML = posGridHtml;
     adminGrid.innerHTML = adminGridHtml;
-    cacheProductImagesForOffline();
 }
 
 function getProductCartActionsHtml(product) {
@@ -1944,6 +1976,30 @@ function invoiceBelongsToCustomer(invoice, customer) {
         return String(invoice.customerLocalId) === String(customer.localId);
     }
     return normalizeCustomerNameKey(invoice.customer) === normalizeCustomerNameKey(customer.name);
+}
+
+function paymentBelongsToCustomer(payment, customer) {
+    if (!payment || !customer) return false;
+    if (payment.customerLocalId && customer.localId) {
+        return String(payment.customerLocalId) === String(customer.localId);
+    }
+    return normalizeCustomerNameKey(payment.customerName) === normalizeCustomerNameKey(customer.name);
+}
+
+function getCustomerGrossDebt(customer) {
+    return db.invoices
+        .filter(invoice => invoice.status !== 'واصل' && invoiceBelongsToCustomer(invoice, customer))
+        .reduce((sum, invoice) => sum + Number(invoice.total || 0), 0);
+}
+
+function getCustomerPaymentTotal(customer, excludedPaymentId = null) {
+    return db.payments
+        .filter(payment => payment.id != excludedPaymentId && paymentBelongsToCustomer(payment, customer))
+        .reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+}
+
+function getCustomerOutstandingDebt(customer) {
+    return Math.max(0, getCustomerGrossDebt(customer) - getCustomerPaymentTotal(customer));
 }
 
 function linkInvoicesToCustomer(customer, previousCustomerName) {
@@ -2003,7 +2059,7 @@ function deleteCustomer(id, event) {
                 customAlert('تعذر حفظ حذف الزبون محلياً. لم يتم حذف الزبون.');
                 return;
             }
-            renderCustomers(); updateCartCustomerSelect();
+            renderCustomers(); renderSettlementsTab(); updateCartCustomerSelect();
             customAlert('تم حذف الزبون بنجاح!');
         }
     });
@@ -2056,7 +2112,7 @@ async function saveCustomer() {
     }
 
     customAlert(action === 'update' ? 'تم تعديل الزبون بنجاح!' : 'تم حفظ الزبون بنجاح!');
-    renderCustomers(); updateCartCustomerSelect(); closeModal('addCustomerModal'); 
+    renderCustomers(); renderSettlementsTab(); updateCartCustomerSelect(); closeModal('addCustomerModal');
     document.getElementById('newCustName').value = ''; 
     document.getElementById('newCustPhone').value = '';
     document.getElementById('newCustAddress').value = '';
@@ -2116,6 +2172,324 @@ function renderCustomers() {
             </div>`;
     });
     list.innerHTML = listHtml;
+}
+
+let selectedSettlementCustomerId = null;
+
+function findSettlementCustomer() {
+    return db.customers.find(customer => String(customer.localId) === String(selectedSettlementCustomerId)) || null;
+}
+
+function renderSettlementsTab() {
+    const results = document.getElementById('settlementCustomerResults');
+    const workspace = document.getElementById('settlementWorkspace');
+    if (!results || !workspace) return;
+    renderSettlementCustomers();
+    renderSettlementWorkspace();
+}
+
+function renderSettlementCustomers() {
+    const results = document.getElementById('settlementCustomerResults');
+    const search = document.getElementById('settlementCustomerSearch');
+    if (!results) return;
+    const query = normalizeCustomerSearchText(search ? search.value : '');
+    const matches = [...db.customers]
+        .filter(customer => !query || normalizeCustomerSearchText(customer.name).startsWith(query))
+        .sort((first, second) => String(first.name).localeCompare(String(second.name), 'ar'));
+    if (!matches.length) {
+        results.innerHTML = '<span style="color:var(--text-muted); padding:8px;">لا يوجد زبون مطابق.</span>';
+        return;
+    }
+    results.innerHTML = matches.map(customer => `
+        <button type="button" class="settlement-customer-chip ${String(customer.localId) === String(selectedSettlementCustomerId) ? 'active' : ''}"
+            onclick="selectSettlementCustomer('${customer.localId}')">
+            <i class="fas fa-user"></i> ${escapeInvoiceHtml(customer.name)}
+        </button>`).join('');
+}
+
+function selectSettlementCustomer(customerLocalId) {
+    selectedSettlementCustomerId = String(customerLocalId);
+    renderSettlementCustomers();
+    renderSettlementWorkspace();
+}
+
+function getSelectedCustomerPayments(customer) {
+    return db.payments
+        .filter(payment => paymentBelongsToCustomer(payment, customer))
+        .sort((first, second) => Number(second.id || 0) - Number(first.id || 0));
+}
+
+function renderSettlementWorkspace() {
+    const workspace = document.getElementById('settlementWorkspace');
+    if (!workspace) return;
+    const customer = findSettlementCustomer();
+    if (!customer) {
+        workspace.innerHTML = '<div class="settlement-empty-state"><i class="fas fa-hand-holding-dollar"></i><p>اختر زبوناً لعرض الدين والتسديدات.</p></div>';
+        return;
+    }
+    const debt = getCustomerOutstandingDebt(customer);
+    const payments = getSelectedCustomerPayments(customer);
+    const paymentRows = payments.length ? payments.map(payment => `
+        <div class="settlement-transaction">
+            <div class="settlement-transaction-info">
+                <strong>${Number(payment.amount).toLocaleString()} د.ع</strong>
+                <small><i class="far fa-calendar-alt"></i> ${escapeInvoiceHtml(payment.date)} ${escapeInvoiceHtml(payment.time)}</small>
+            </div>
+            <div class="settlement-actions" aria-label="إجراءات التسديد">
+                <button class="btn-3d btn-red" type="button" aria-label="حذف" onclick="deleteSettlementPayment(${payment.id})"><i class="fas fa-trash"></i></button>
+                <button class="btn-3d" type="button" aria-label="مشاركة" style="background:#25D366;color:#fff;box-shadow:0 5px 0 #168b42;" onclick="shareSettlementReceipt(${payment.id})"><i class="fas fa-share-nodes"></i></button>
+                <button class="btn-3d btn-blue" type="button" aria-label="عرض PDF" onclick="exportSettlementPDF('${customer.localId}')"><i class="fas fa-file-pdf"></i></button>
+                <button class="btn-3d btn-blue" type="button" aria-label="تعديل" onclick="openSettlementPaymentModal(${payment.id})"><i class="fas fa-pen"></i></button>
+            </div>
+        </div>`).join('') : '<div class="settlement-empty-state" style="min-height:120px;"><i class="fas fa-receipt" style="font-size:35px;"></i><p>لا توجد تسديدات لهذا الزبون.</p></div>';
+    workspace.innerHTML = `
+        <h2 class="settlement-customer-title"><i class="fas fa-user-check"></i> ${escapeInvoiceHtml(customer.name)}</h2>
+        <div class="settlement-debt-row">
+            <div class="settlement-debt-card"><span>الدين الكلي المتبقي</span><strong>${debt.toLocaleString()} د.ع</strong></div>
+            <button class="btn-3d settlement-pay-button" type="button" onclick="openSettlementPaymentModal()" ${debt <= 0 ? 'disabled' : ''}><i class="fas fa-hand-holding-dollar"></i><br>تسديد</button>
+        </div>
+        <div class="settlement-history-title">
+            <h3>معاملات التسديد</h3>
+            ${payments.length ? `<button class="btn-3d btn-blue" type="button" onclick="exportSettlementPDF('${customer.localId}')"><i class="fas fa-file-pdf"></i> كشف PDF</button>` : ''}
+        </div>
+        ${paymentRows}`;
+}
+
+function normalizeIraqiAmount(value) {
+    const arabicDigits = '٠١٢٣٤٥٦٧٨٩';
+    const persianDigits = '۰۱۲۳۴۵۶۷۸۹';
+    const normalized = String(value || '')
+        .replace(/[٠-٩]/g, digit => String(arabicDigits.indexOf(digit)))
+        .replace(/[۰-۹]/g, digit => String(persianDigits.indexOf(digit)))
+        .replace(/[\s,٬،]/g, '');
+    if (!/^\d+$/.test(normalized)) return NaN;
+    return Number(normalized);
+}
+
+function openSettlementPaymentModal(paymentId = null) {
+    const customer = findSettlementCustomer();
+    if (!customer) {
+        customAlert('اختر زبوناً أولاً.');
+        return;
+    }
+    const payment = paymentId === null ? null : db.payments.find(item => item.id == paymentId);
+    const maximum = Math.max(0, getCustomerGrossDebt(customer) - getCustomerPaymentTotal(customer, payment && payment.id));
+    document.getElementById('settlementPaymentModalTitle').textContent = payment ? 'تعديل التسديد' : 'تسديد دين';
+    document.getElementById('editSettlementPaymentId').value = payment ? String(payment.id) : '';
+    document.getElementById('settlementModalCustomer').textContent = customer.name;
+    document.getElementById('settlementAmount').value = payment ? Number(payment.amount).toLocaleString('en-US') : '';
+    document.getElementById('settlementPaymentLimit').textContent = `الحد الأعلى: ${maximum.toLocaleString()} د.ع`;
+    openModal('settlementPaymentModal');
+    setTimeout(() => document.getElementById('settlementAmount').focus(), 100);
+}
+
+async function saveSettlementPayment() {
+    const customer = findSettlementCustomer();
+    if (!customer) return;
+    const editId = document.getElementById('editSettlementPaymentId').value;
+    const existing = editId ? db.payments.find(payment => payment.id == editId) : null;
+    const amount = normalizeIraqiAmount(document.getElementById('settlementAmount').value);
+    const maximum = Math.max(0, getCustomerGrossDebt(customer) - getCustomerPaymentTotal(customer, existing && existing.id));
+    if (!Number.isSafeInteger(amount) || amount <= 0) {
+        customAlert('أدخل مبلغاً صحيحاً أكبر من صفر بالدينار العراقي.');
+        return;
+    }
+    if (amount > maximum) {
+        customAlert(`المبلغ أكبر من الدين المتبقي. الحد الأعلى ${maximum.toLocaleString()} د.ع.`);
+        return;
+    }
+    const previousPayments = JSON.parse(JSON.stringify(db.payments));
+    const now = new Date();
+    let savedPayment;
+    if (existing) {
+        Object.assign(existing, normalizePaymentForStorage({
+            ...existing,
+            customerLocalId: customer.localId,
+            customerName: customer.name,
+            amount,
+            updatedAt: Date.now()
+        }));
+        savedPayment = existing;
+    } else {
+        savedPayment = normalizePaymentForStorage({
+            localId: createLocalId('payment'),
+            id: Date.now(),
+            customerLocalId: customer.localId,
+            customerName: customer.name,
+            amount,
+            date: now.toLocaleDateString('ar-IQ'),
+            time: now.toLocaleTimeString('ar-IQ', { hour: '2-digit', minute: '2-digit' }),
+            updatedAt: Date.now()
+        });
+        db.payments.push(savedPayment);
+    }
+    try {
+        await saveAppDataAndQueueOperation('payment', savedPayment.id, existing ? 'update' : 'create', savedPayment);
+        syncChangesIfOnline();
+    } catch (error) {
+        db.payments = previousPayments;
+        customAlert('تعذر حفظ التسديد محلياً. لم تتغير البيانات.');
+        return;
+    }
+    closeModal('settlementPaymentModal');
+    renderSettlementWorkspace();
+    renderCustomers();
+    customAlert(existing ? 'تم تعديل مبلغ التسديد وإعادة حساب الدين.' : 'تم حفظ التسديد وخصمه من الدين.');
+}
+
+function deleteSettlementPayment(paymentId) {
+    const payment = db.payments.find(item => item.id == paymentId);
+    if (!payment) return;
+    customConfirm('هل أنت متأكد من حذف التسديد؟ سيُعاد المبلغ إلى الدين المتبقي.', async () => {
+        const previousPayments = JSON.parse(JSON.stringify(db.payments));
+        const deletedPayment = normalizePaymentForStorage({
+            ...payment,
+            updatedAt: Date.now(),
+            isDeleted: true
+        });
+        db.payments = db.payments.filter(item => item.id != paymentId);
+        try {
+            await saveAppDataAndQueueOperation('payment', payment.id, 'delete', deletedPayment);
+            syncChangesIfOnline();
+        } catch (error) {
+            db.payments = previousPayments;
+            customAlert('تعذر حفظ الحذف محلياً. لم تتغير البيانات.');
+            return;
+        }
+        renderSettlementWorkspace();
+        renderCustomers();
+        customAlert('تم حذف التسديد وإعادة المبلغ إلى الدين.');
+    });
+}
+
+async function shareSettlementReceipt(paymentId) {
+    const payment = db.payments.find(item => item.id == paymentId);
+    const customer = payment && db.customers.find(item => paymentBelongsToCustomer(payment, item));
+    if (!payment || !customer) return;
+    try {
+        if (!navigator.share) {
+            customAlert('هذا الجهاز أو المتصفح لا يدعم قائمة المشاركة. استخدم كشف PDF.');
+            return;
+        }
+        await navigator.share({
+            title: 'إيصال تسديد',
+            text: `إيصال تسديد\nالزبون: ${customer.name}\nالمبلغ: ${Number(payment.amount).toLocaleString()} د.ع\nالتاريخ: ${payment.date} ${payment.time}\nالدين المتبقي: ${getCustomerOutstandingDebt(customer).toLocaleString()} د.ع`
+        });
+    } catch (error) {
+        if (!error || error.name !== 'AbortError') customAlert('تعذر فتح قائمة المشاركة على هذا الجهاز.');
+    }
+}
+
+function normalizeDownloadedPayment(payment) {
+    return normalizePaymentForStorage({
+        ...payment,
+        updatedAt: payment.updatedAt || payment._creationTime
+    });
+}
+
+function mergeDownloadedPayments(remotePayments, pendingItems) {
+    if (!Array.isArray(remotePayments)) return;
+    const pendingLocalIds = new Set(
+        pendingItems
+            .filter(item => item.status === 'pending' && item.type === 'payment')
+            .map(item => String(item.payload && item.payload.localId || ''))
+    );
+    const byLocalId = new Map(db.payments.map(payment => [String(payment.localId), payment]));
+    remotePayments.forEach(remoteValue => {
+        if (!remoteValue || typeof remoteValue.localId !== 'string') return;
+        const remote = normalizeDownloadedPayment(remoteValue);
+        const local = byLocalId.get(remote.localId);
+        if (pendingLocalIds.has(remote.localId)) return;
+        if (remote.isDeleted) {
+            if (local && remote.updatedAt >= Number(local.updatedAt || 0)) {
+                db.payments = db.payments.filter(payment => payment !== local);
+                byLocalId.delete(remote.localId);
+            }
+            return;
+        }
+        if (!local) {
+            db.payments.push(remote);
+            byLocalId.set(remote.localId, remote);
+        } else if (remote.updatedAt >= Number(local.updatedAt || 0)) {
+            Object.assign(local, remote);
+        }
+    });
+}
+
+function buildSettlementStatementSheetHtml(customer) {
+    const payments = getSelectedCustomerPayments(customer);
+    const grossDebt = getCustomerGrossDebt(customer);
+    const paidTotal = getCustomerPaymentTotal(customer);
+    const remainingDebt = getCustomerOutstandingDebt(customer);
+    const rows = payments.map((payment, index) => `
+        <tr><td>${index + 1}</td><td>${escapeInvoiceHtml(payment.date)}</td><td>${escapeInvoiceHtml(payment.time)}</td><td>${Number(payment.amount).toLocaleString()} د.ع</td></tr>`).join('');
+    return `
+        <main class="settlement-sheet" id="settlementShareSource">
+            <div class="header-info"><h1>مكتب الجوهرة للتجارة لحلويات والمشروبات</h1><p>بإدارة: حسين</p><p>العنوان: ميسان</p><p>أرقام المكتب: 07735277518 | 07744090022</p></div>
+            <hr><h2>كشف تسديدات</h2>
+            <p class="statement-customer"><strong>الزبون:</strong> ${escapeInvoiceHtml(customer.name)}</p>
+            <div class="statement-summary">
+                <div><span>دين فواتير الآجل</span><strong>${grossDebt.toLocaleString()} د.ع</strong></div>
+                <div><span>إجمالي التسديد</span><strong>${paidTotal.toLocaleString()} د.ع</strong></div>
+                <div><span>الدين المتبقي</span><strong>${remainingDebt.toLocaleString()} د.ع</strong></div>
+            </div>
+            <table><thead><tr><th>ت</th><th>التاريخ</th><th>الوقت</th><th>المبلغ</th></tr></thead><tbody>${rows}</tbody></table>
+            <h3 class="statement-total">الدين المتبقي: ${remainingDebt.toLocaleString()} د.ع</h3>
+        </main>`;
+}
+
+function buildSettlementStatementPreviewHtml(customer) {
+    return `
+    <html dir="rtl" lang="ar"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>كشف تسديدات - ${escapeInvoiceHtml(customer.name)}</title>
+    <style>
+        *{box-sizing:border-box}body{margin:0;padding:10px;background:#f3f4f6;color:#111;font-family:Arial,sans-serif;font-size:14px}.preview-actions{position:sticky;top:0;z-index:10;display:flex;gap:8px;padding:10px;margin:0 auto 10px;max-width:900px;background:rgba(255,255,255,.96);box-shadow:0 2px 10px rgba(0,0,0,.12)}.preview-actions button{width:100%;border:0;border-radius:10px;padding:13px;color:#fff;background:#087fce;font:700 16px Arial,sans-serif}.preview-actions .share-button{background:#21b861}.settlement-sheet{width:100%;max-width:900px;margin:0 auto;padding:20px;background:#fff}.header-info{text-align:center;margin-bottom:20px}.header-info h1{margin:0;font-size:24px}.header-info p{margin:5px 0}hr{border:0;border-top:2px dashed #ddd;margin:20px 0}h2{text-align:center}.statement-customer{font-size:16px}.statement-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:16px 0}.statement-summary div{display:flex;flex-direction:column;gap:5px;padding:12px;border:1px solid #ddd;border-radius:9px;text-align:center}.statement-summary span{font-size:12px;color:#555}.statement-summary strong{font-size:17px}table{width:100%;border-collapse:collapse;margin-top:20px;text-align:center}th{background:#f2f2f2;border:1px solid #ddd;padding:10px}td{border:1px solid #ddd;padding:8px}.statement-total{text-align:left;margin-top:20px}@media(max-width:520px){body{padding:4px}.settlement-sheet{padding:12px 8px}.header-info h1{font-size:20px}.statement-summary{grid-template-columns:1fr}.settlement-sheet table{font-size:12px}th,td{padding:6px 3px}}@media print{body{padding:0;background:#fff}.preview-actions{display:none}.settlement-sheet{max-width:none;padding:0}}
+    </style></head><body><div class="preview-actions"><button type="button" class="share-button" id="shareSettlementButton">مشاركة PDF</button><button type="button" onclick="window.print()">طباعة / حفظ PDF</button></div>${buildSettlementStatementSheetHtml(customer)}</body></html>`;
+}
+
+function exportSettlementPDF(customerLocalId) {
+    const customer = db.customers.find(item => String(item.localId) === String(customerLocalId));
+    if (!customer) return;
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) {
+        customAlert('تعذر فتح كشف التسديدات. اسمح بالنوافذ المنبثقة ثم حاول مجدداً.');
+        return;
+    }
+    printWindow.document.write(buildSettlementStatementPreviewHtml(customer));
+    printWindow.document.close();
+    printWindow.document.getElementById('shareSettlementButton').onclick = () => shareSettlementPdf(customer, printWindow);
+}
+
+async function shareSettlementPdf(customer, previewWindow = window) {
+    const shareButton = previewWindow.document.getElementById('shareSettlementButton');
+    try {
+        const statementSheet = previewWindow.document.getElementById('settlementShareSource');
+        if (!statementSheet || typeof window.html2canvas !== 'function') throw new Error('Statement renderer is unavailable.');
+        if (shareButton) { shareButton.disabled = true; shareButton.textContent = 'جاري تجهيز PDF...'; }
+        if (previewWindow.document.fonts && previewWindow.document.fonts.ready) await previewWindow.document.fonts.ready;
+        const statementCanvas = await window.html2canvas(statementSheet, {
+            backgroundColor: '#ffffff',
+            scale: Math.max(2, Math.min(3, window.devicePixelRatio || 1)),
+            logging: false,
+            useCORS: true
+        });
+        const pdfBlob = createInvoicePdfBlob(splitInvoiceCanvasIntoPages(statementCanvas, statementSheet));
+        const safeName = invoicePdfText(customer.name).replace(/[^\w\u0600-\u06FF-]+/g, '-');
+        const PreviewFile = previewWindow.File || File;
+        const pdfFile = new PreviewFile([pdfBlob], `settlements-${safeName || 'customer'}.pdf`, { type: 'application/pdf' });
+        const previewNavigator = previewWindow.navigator;
+        if (previewNavigator.share && previewNavigator.canShare && previewNavigator.canShare({ files: [pdfFile] })) {
+            await previewNavigator.share({ title: `كشف تسديدات ${customer.name}`, files: [pdfFile] });
+            return;
+        }
+        previewWindow.alert('هذا الجهاز أو المتصفح لا يدعم مشاركة ملفات PDF. استخدم زر طباعة / حفظ PDF.');
+    } catch (error) {
+        if (!error || error.name !== 'AbortError') {
+            console.error('تعذر إنشاء أو مشاركة كشف التسديدات.', error);
+            previewWindow.alert('تعذرت المشاركة. يمكنك استخدام زر طباعة / حفظ PDF.');
+        }
+    } finally {
+        if (shareButton) { shareButton.disabled = false; shareButton.textContent = 'مشاركة PDF'; }
+    }
 }
 
 function updateCartCustomerSelect() {
@@ -2454,134 +2828,138 @@ function invoicePdfText(value) {
     return String(value ?? '').replace(/\s+/g, ' ').trim();
 }
 
-function fitInvoicePdfText(ctx, value, maxWidth) {
-    const text = invoicePdfText(value);
-    if (ctx.measureText(text).width <= maxWidth) return text;
-    let shortened = text;
-    while (shortened.length > 1 && ctx.measureText(`…${shortened}`).width > maxWidth) {
-        shortened = shortened.slice(0, -1);
-    }
-    return `${shortened}…`;
+function escapeInvoiceHtml(value) {
+    return invoicePdfText(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
 }
 
-function drawInvoicePdfPage(order, pageItems, pageNumber, pageCount, isLastPage) {
-    const canvas = document.createElement('canvas');
-    canvas.width = 1240;
-    canvas.height = 1754;
-    const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.direction = 'rtl';
-    ctx.textBaseline = 'middle';
+function buildInvoiceRowsHtml(order) {
+    return (Array.isArray(order.items) ? order.items : []).map((item, index) => {
+        const name = escapeInvoiceHtml(item.name);
+        const halfCarton = isInvoiceItemHalfCarton(item) ? '<br><strong>نصف كارتون</strong>' : '';
+        const note = item.note ? `<br><span class="invoice-item-note">${escapeInvoiceHtml(item.note)}</span>` : '';
+        const price = Number(item.price || 0);
+        const quantity = Number(item.qty || 0);
+        return `<tr><td>${index + 1}</td><td>${name}${halfCarton}${note}</td><td>${escapeInvoiceHtml(item.qty)}</td><td>${price.toLocaleString()}</td><td>${(price * quantity).toLocaleString()}</td></tr>`;
+    }).join('');
+}
 
-    ctx.fillStyle = '#111111';
-    ctx.textAlign = 'center';
-    ctx.font = 'bold 38px Arial, sans-serif';
-    ctx.fillText('مكتب الجوهرة للتجارة للحلويات والمشروبات', canvas.width / 2, 85);
-    ctx.font = '25px Arial, sans-serif';
-    ctx.fillText('بإدارة: حسين — العنوان: ميسان', canvas.width / 2, 135);
-    ctx.fillText('07735277518  |  07744090022', canvas.width / 2, 175);
+function buildInvoiceSheetHtml(order) {
+    return `
+        <main class="invoice-sheet" id="invoiceShareSource">
+            <div class="header-info">
+                <h1>مكتب الجوهرة للتجارة لحلويات والمشروبات</h1>
+                <p>بإدارة: حسين</p>
+                <p>العنوان: ميسان</p>
+                <p>أرقام المكتب: 07735277518 | 07744090022</p>
+            </div>
+            <hr>
+            <h2>فاتورة مبيعات</h2>
+            <div class="invoice-meta"><div><strong>رقم الفاتورة:</strong> ${escapeInvoiceHtml(order.id)}</div><div><strong>التاريخ:</strong> ${escapeInvoiceHtml(order.date)} - ${escapeInvoiceHtml(order.time)}</div></div>
+            <div class="invoice-customer"><strong>العميل:</strong> ${escapeInvoiceHtml(order.customer)}</div>
+            <table><thead><tr><th>ت</th><th>الصنف</th><th>الكمية</th><th>السعر</th><th>الإجمالي</th></tr></thead><tbody>${buildInvoiceRowsHtml(order)}</tbody></table>
+            <h3 class="invoice-total">الإجمالي الكلي: ${Number(order.total || 0).toLocaleString()} د.ع</h3>
+            <p class="invoice-status">حالة الدفع: ${escapeInvoiceHtml(order.status)}</p>
+        </main>`;
+}
 
-    ctx.strokeStyle = '#b7b7b7';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(70, 215);
-    ctx.lineTo(1170, 215);
-    ctx.stroke();
-
-    ctx.font = 'bold 34px Arial, sans-serif';
-    ctx.fillText('فاتورة مبيعات', canvas.width / 2, 265);
-    ctx.font = '25px Arial, sans-serif';
-    ctx.textAlign = 'right';
-    ctx.fillText(`رقم الفاتورة: ${invoicePdfText(order.id)}`, 1160, 320);
-    ctx.fillText(`العميل: ${invoicePdfText(order.customer)}`, 1160, 365);
-    ctx.textAlign = 'left';
-    ctx.fillText(`التاريخ: ${invoicePdfText(order.date)} - ${invoicePdfText(order.time)}`, 80, 320);
-    ctx.fillText(`الصفحة: ${pageNumber} / ${pageCount}`, 80, 365);
-
-    const tableTop = 415;
-    const rowHeight = 70;
-    const columns = [70, 150, 665, 790, 980, 1170];
-    ctx.fillStyle = '#eeeeee';
-    ctx.fillRect(columns[0], tableTop, columns[columns.length - 1] - columns[0], rowHeight);
-    ctx.strokeStyle = '#9a9a9a';
-    ctx.strokeRect(columns[0], tableTop, columns[columns.length - 1] - columns[0], rowHeight);
-    columns.slice(1, -1).forEach(x => {
-        ctx.beginPath();
-        ctx.moveTo(x, tableTop);
-        ctx.lineTo(x, tableTop + rowHeight * (pageItems.length + 1));
-        ctx.stroke();
-    });
-
-    ctx.fillStyle = '#111111';
-    ctx.textAlign = 'center';
-    ctx.font = 'bold 24px Arial, sans-serif';
-    const headers = ['ت', 'الصنف', 'الكمية', 'السعر', 'الإجمالي'];
-    headers.forEach((header, index) => {
-        ctx.fillText(header, (columns[index] + columns[index + 1]) / 2, tableTop + rowHeight / 2);
-    });
-
-    ctx.font = '23px Arial, sans-serif';
-    pageItems.forEach((item, index) => {
-        const y = tableTop + rowHeight * (index + 1);
-        ctx.fillStyle = index % 2 === 0 ? '#ffffff' : '#fafafa';
-        ctx.fillRect(columns[0], y, columns[columns.length - 1] - columns[0], rowHeight);
-        ctx.strokeStyle = '#c7c7c7';
-        ctx.strokeRect(columns[0], y, columns[columns.length - 1] - columns[0], rowHeight);
-        ctx.fillStyle = '#111111';
-
-        const itemNumber = (pageNumber - 1) * 14 + index + 1;
-        const halfLabel = isInvoiceItemHalfCarton(item) ? ' (نصف كارتون)' : '';
-        const noteLabel = item.note ? ` - ${item.note}` : '';
-        const values = [
-            itemNumber,
-            fitInvoicePdfText(ctx, `${item.name}${halfLabel}${noteLabel}`, columns[2] - columns[1] - 24),
-            item.qty,
-            Number(item.price || 0).toLocaleString(),
-            (Number(item.price || 0) * Number(item.qty || 0)).toLocaleString()
-        ];
-        values.forEach((value, valueIndex) => {
-            ctx.fillText(value, (columns[valueIndex] + columns[valueIndex + 1]) / 2, y + rowHeight / 2);
-        });
-    });
-
-    if (isLastPage) {
-        const summaryY = tableTop + rowHeight * (pageItems.length + 1) + 65;
-        ctx.textAlign = 'right';
-        ctx.font = 'bold 30px Arial, sans-serif';
-        ctx.fillStyle = '#159447';
-        ctx.fillText(`الإجمالي الكلي: ${Number(order.total || 0).toLocaleString()} د.ع`, 1160, summaryY);
-        ctx.fillStyle = '#111111';
-        ctx.font = '26px Arial, sans-serif';
-        ctx.fillText(`حالة الدفع: ${invoicePdfText(order.status)}`, 1160, summaryY + 55);
-    }
-
-    ctx.fillStyle = '#777777';
-    ctx.textAlign = 'center';
-    ctx.font = '21px Arial, sans-serif';
-    ctx.fillText(`فاتورة #${invoicePdfText(order.id)}`, canvas.width / 2, canvas.height - 45);
-    return canvas;
+function buildInvoicePreviewHtml(order) {
+    return `
+    <html dir="rtl" lang="ar">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>فاتورة #${escapeInvoiceHtml(order.id)}</title>
+        <style>
+            *{box-sizing:border-box;}
+            body{margin:0; padding:10px; background:#f3f4f6; color:#111; font-family:Arial,sans-serif; font-size:14px;}
+            .preview-actions{position:sticky; top:0; z-index:10; display:flex; gap:10px; padding:10px; margin:0 auto 10px; max-width:900px; background:rgba(255,255,255,.96); box-shadow:0 2px 10px rgba(0,0,0,.12);}
+            .preview-actions button{flex:1; border:0; border-radius:10px; padding:13px 10px; color:#fff; font:700 16px Arial,sans-serif; cursor:pointer;}
+            .share-button{background:#21b861;}
+            .print-button{background:#087fce;}
+            .invoice-sheet{width:100%; max-width:900px; margin:0 auto; padding:20px; background:#fff;}
+            .header-info{text-align:center; margin-bottom:20px;}
+            .header-info h1{margin:0; font-size:24px;}
+            .header-info p{margin:5px 0;}
+            hr{border:0; border-top:2px dashed #ddd; margin:20px 0;}
+            h2{text-align:center;}
+            .invoice-meta{display:flex; justify-content:space-between; gap:12px; margin-top:10px;}
+            .invoice-customer{margin-top:10px;}
+            table{width:100%; border-collapse:collapse; margin-top:20px; text-align:center; table-layout:auto;}
+            th{background:#f2f2f2; border:1px solid #ddd; padding:10px;}
+            td{border:1px solid #ddd; padding:8px; overflow-wrap:anywhere;}
+            .invoice-item-note{font-size:11px; color:#555;}
+            .invoice-total,.invoice-status{text-align:left; margin-top:20px;}
+            .invoice-status{margin-top:0;}
+            @media(max-width:520px){body{padding:4px;}.preview-actions{padding:6px; gap:6px;}.preview-actions button{font-size:14px; padding:11px 6px;}.invoice-sheet{padding:12px 8px;}.header-info h1{font-size:20px;}.invoice-meta{font-size:12px;}.invoice-sheet table{font-size:12px;}th,td{padding:6px 3px;}}
+            @media print{body{padding:0; background:#fff;}.preview-actions{display:none;}.invoice-sheet{max-width:none; padding:0;}}
+        </style>
+    </head>
+    <body>
+        <div class="preview-actions">
+            <button type="button" class="share-button" id="shareInvoiceButton">مشاركة PDF</button>
+            <button type="button" class="print-button" onclick="window.print()">طباعة / حفظ PDF</button>
+        </div>
+        ${buildInvoiceSheetHtml(order)}
+    </body></html>`;
 }
 
 function invoiceCanvasToJpegBytes(canvas) {
-    const encoded = canvas.toDataURL('image/jpeg', 0.92).split(',')[1];
+    const encoded = canvas.toDataURL('image/jpeg', 1).split(',')[1];
     const binary = atob(encoded);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
     return bytes;
 }
 
-function createInvoicePdfBlob(order) {
-    const items = Array.isArray(order.items) ? order.items : [];
-    const itemPages = [];
-    for (let i = 0; i < Math.max(items.length, 1); i += 14) itemPages.push(items.slice(i, i + 14));
-    const canvases = itemPages.map((pageItems, index) => drawInvoicePdfPage(
-        order,
-        pageItems,
-        index + 1,
-        itemPages.length,
-        index === itemPages.length - 1
-    ));
+function getInvoiceCanvasRowBoundaries(sourceCanvas, sourceElement) {
+    const elementRect = sourceElement.getBoundingClientRect();
+    const canvasScale = sourceCanvas.width / Math.max(1, elementRect.width);
+    const boundaries = Array.from(sourceElement.querySelectorAll('tr')).map(row => {
+        const rowRect = row.getBoundingClientRect();
+        return Math.round((rowRect.bottom - elementRect.top) * canvasScale);
+    });
+    boundaries.push(sourceCanvas.height);
+    return [...new Set(boundaries)]
+        .filter(boundary => boundary > 0 && boundary <= sourceCanvas.height)
+        .sort((first, second) => first - second);
+}
+
+function splitInvoiceCanvasIntoPages(sourceCanvas, sourceElement) {
+    const a4Ratio = 841.89 / 595.28;
+    const maxPageHeight = Math.max(1, Math.floor(sourceCanvas.width * a4Ratio));
+    const rowBoundaries = getInvoiceCanvasRowBoundaries(sourceCanvas, sourceElement);
+    const pages = [];
+    let sourceY = 0;
+    while (sourceY < sourceCanvas.height) {
+        const idealEnd = Math.min(sourceCanvas.height, sourceY + maxPageHeight);
+        let pageEnd = idealEnd;
+        if (idealEnd < sourceCanvas.height) {
+            const minimumUsefulEnd = sourceY + Math.floor(maxPageHeight * 0.55);
+            const safeBoundary = rowBoundaries
+                .filter(boundary => boundary >= minimumUsefulEnd && boundary <= idealEnd)
+                .pop();
+            if (safeBoundary) pageEnd = safeBoundary;
+        }
+        const pageHeight = Math.max(1, pageEnd - sourceY);
+        const pageCanvas = document.createElement('canvas');
+        pageCanvas.width = sourceCanvas.width;
+        pageCanvas.height = pageHeight;
+        const pageContext = pageCanvas.getContext('2d');
+        pageContext.fillStyle = '#ffffff';
+        pageContext.fillRect(0, 0, pageCanvas.width, pageCanvas.height);
+        pageContext.drawImage(sourceCanvas, 0, sourceY, sourceCanvas.width, pageHeight, 0, 0, pageCanvas.width, pageHeight);
+        pages.push(pageCanvas);
+        sourceY = pageEnd;
+    }
+    return pages;
+}
+
+function createInvoicePdfBlob(canvases) {
     const jpegPages = canvases.map(canvas => ({
         width: canvas.width,
         height: canvas.height,
@@ -2599,7 +2977,9 @@ function createInvoicePdfBlob(order) {
         const pageObject = 3 + index * 3;
         const imageObject = pageObject + 1;
         const contentObject = pageObject + 2;
-        const content = ascii('q\n595.28 0 0 841.89 0 0 cm\n/Im0 Do\nQ');
+        const renderedHeight = Math.min(841.89, 595.28 * page.height / page.width);
+        const renderedY = 841.89 - renderedHeight;
+        const content = ascii(`q\n595.28 0 0 ${renderedHeight.toFixed(2)} 0 ${renderedY.toFixed(2)} cm\n/Im0 Do\nQ`);
         objects[pageObject] = ascii(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595.28 841.89] /Resources << /XObject << /Im0 ${imageObject} 0 R >> >> /Contents ${contentObject} 0 R >>`);
         objects[imageObject] = [
             ascii(`<< /Type /XObject /Subtype /Image /Width ${page.width} /Height ${page.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${page.bytes.length} >>\nstream\n`),
@@ -2638,59 +3018,33 @@ function createInvoicePdfBlob(order) {
 }
 
 function openInvoicePrintDialog(order) {
-    let printWindow = window.open('', '_blank'); let itemsRows = "";
+    const printWindow = window.open('', '_blank');
     if (!printWindow) {
         customAlert('تعذر فتح معاينة الفاتورة. يرجى السماح بالنوافذ المنبثقة ثم المحاولة مجددًا.');
         return;
     }
-    order.items.forEach((item, i) => { itemsRows += `<tr><td style="border:1px solid #ddd; padding:8px;">${i+1}</td><td style="border:1px solid #ddd; padding:8px;">${item.name}${isInvoiceItemHalfCarton(item) ? '<br><strong>نصف كارتون</strong>' : ''}${item.note ? `<br><span style="font-size:11px; color:#555;">${item.note}</span>` : ''}</td><td style="border:1px solid #ddd; padding:8px;">${item.qty}</td><td style="border:1px solid #ddd; padding:8px;">${item.price.toLocaleString()}</td><td style="border:1px solid #ddd; padding:8px;">${(item.price * item.qty).toLocaleString()}</td></tr>`; });
-
-    let html = `
-    <html dir="rtl" lang="ar">
-    <head>
-        <title>فاتورة #${order.id}</title>
-        <style> 
-            body{font-family: Arial, sans-serif; padding:20px; font-size: 14px;} 
-            .preview-actions{position:sticky; top:0; z-index:10; display:flex; gap:10px; padding:10px; margin:-10px -10px 20px; background:rgba(255,255,255,.96); box-shadow:0 2px 10px rgba(0,0,0,.12);}
-            .preview-actions button{flex:1; border:0; border-radius:10px; padding:13px 10px; color:#fff; font:700 16px Arial,sans-serif; cursor:pointer;}
-            .share-button{background:#21b861;}
-            .print-button{background:#087fce;}
-            .header-info { text-align: center; margin-bottom: 20px; }
-            .header-info h1 { margin: 0; font-size: 24px; }
-            .header-info p { margin: 5px 0; }
-            table{width:100%; border-collapse:collapse; margin-top:20px; text-align:center;} 
-            th{background:#f2f2f2; border:1px solid #ddd; padding:10px;} 
-            td{border:1px solid #ddd; padding:8px;}
-            @media print{.preview-actions{display:none;} body{padding:0;}}
-        </style>
-    </head>
-    <body>
-        <div class="preview-actions">
-            <button type="button" class="share-button" id="shareInvoiceButton">مشاركة PDF</button>
-            <button type="button" class="print-button" onclick="window.print()">طباعة / حفظ PDF</button>
-        </div>
-        <div class="header-info">
-            <h1>مكتب الجوهرة للتجارة لحلويات والمشروبات</h1>
-            <p>بإدارة: حسين</p>
-            <p>العنوان: ميسان</p>
-            <p>أرقام المكتب: 07735277518 | 07744090022</p>
-        </div>
-        <hr style="border: 1px dashed #ddd; margin: 20px 0;">
-        <h2 style="text-align:center;">فاتورة مبيعات</h2>
-        <div style="display:flex; justify-content:space-between; margin-top:10px;"><div><strong>رقم الفاتورة:</strong> ${order.id}</div><div><strong>التاريخ:</strong> ${order.date} - ${order.time}</div></div>
-        <div style="margin-top:10px;"><strong>العميل:</strong> ${order.customer}</div>
-        <table><tr><th>ت</th><th>الصنف</th><th>الكمية</th><th>السعر</th><th>الإجمالي</th></tr>${itemsRows}</table>
-        <h3 style="text-align:left; margin-top:20px;">الإجمالي الكلي: ${order.total.toLocaleString()} د.ع</h3>
-        <p style="text-align:left;">حالة الدفع: ${order.status}</p>
-    </body></html>`;
-    printWindow.document.write(html);
+    printWindow.document.write(buildInvoicePreviewHtml(order));
     printWindow.document.close();
     printWindow.document.getElementById('shareInvoiceButton').onclick = () => shareInvoicePdf(order, printWindow);
 }
 
-function shareInvoicePdf(order, previewWindow = window) {
+async function shareInvoicePdf(order, previewWindow = window) {
+    const shareButton = previewWindow.document.getElementById('shareInvoiceButton');
     try {
-        const pdfBlob = createInvoicePdfBlob(order);
+        const invoiceSheet = previewWindow.document.getElementById('invoiceShareSource');
+        if (!invoiceSheet || typeof window.html2canvas !== 'function') throw new Error('Invoice renderer is unavailable.');
+        if (shareButton) {
+            shareButton.disabled = true;
+            shareButton.textContent = 'جاري تجهيز PDF...';
+        }
+        if (previewWindow.document.fonts && previewWindow.document.fonts.ready) await previewWindow.document.fonts.ready;
+        const invoiceCanvas = await window.html2canvas(invoiceSheet, {
+            backgroundColor: '#ffffff',
+            scale: Math.max(2, Math.min(3, window.devicePixelRatio || 1)),
+            logging: false,
+            useCORS: true
+        });
+        const pdfBlob = createInvoicePdfBlob(splitInvoiceCanvasIntoPages(invoiceCanvas, invoiceSheet));
         const safeInvoiceId = invoicePdfText(order.id).replace(/[^\w\u0600-\u06FF-]+/g, '-');
         const PreviewFile = previewWindow.File || File;
         const pdfFile = new PreviewFile([pdfBlob], `invoice-${safeInvoiceId || 'sale'}.pdf`, { type: 'application/pdf' });
@@ -2701,17 +3055,21 @@ function shareInvoicePdf(order, previewWindow = window) {
         };
         const previewNavigator = previewWindow.navigator;
         if (previewNavigator.share && previewNavigator.canShare && previewNavigator.canShare({ files: [pdfFile] })) {
-            previewNavigator.share(shareData).catch(error => {
-                if (error && error.name === 'AbortError') return;
-                console.error('تعذرت مشاركة ملف الفاتورة.', error);
-                previewWindow.alert('تعذرت المشاركة. يمكنك استخدام زر طباعة / حفظ PDF.');
-            });
+            await previewNavigator.share(shareData);
             return;
         }
+        previewWindow.alert('هذا الجهاز أو المتصفح لا يدعم مشاركة ملفات PDF. استخدم زر طباعة / حفظ PDF.');
     } catch (error) {
-        console.error('تعذر إنشاء ملف PDF للمشاركة.', error);
+        if (!error || error.name !== 'AbortError') {
+            console.error('تعذر إنشاء أو مشاركة ملف PDF.', error);
+            previewWindow.alert('تعذرت المشاركة. يمكنك استخدام زر طباعة / حفظ PDF.');
+        }
+    } finally {
+        if (shareButton) {
+            shareButton.disabled = false;
+            shareButton.textContent = 'مشاركة PDF';
+        }
     }
-    previewWindow.alert('هذا الجهاز أو المتصفح لا يدعم مشاركة ملفات PDF. استخدم زر طباعة / حفظ PDF.');
 }
 
 function exportToPDF(order) {
@@ -2793,7 +3151,7 @@ function openLedger(name, custId) {
         { name, localId: '' };
     document.getElementById('ledger-name').innerText = customer.name;
     let custInvoices = db.invoices.filter(invoice => invoiceBelongsToCustomer(invoice, customer));
-    let debt = custInvoices.filter(i => i.status !== "واصل").reduce((sum, i) => sum + i.total, 0);
+    let debt = getCustomerOutstandingDebt(customer);
     document.getElementById('ledger-debt').innerText = debt.toLocaleString() + " د.ع";
     
     let invHtml = "";
@@ -2947,17 +3305,22 @@ async function applyAppUpdate() {
     }
 }
 
+const SHARED_DATA_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 let sharedDataRefreshInProgress = false;
-async function refreshSharedDataFromServer() {
+let lastSharedDataRefreshAt = 0;
+async function refreshSharedDataFromServer(force = false) {
     if (!navigator.onLine || sharedDataRefreshInProgress) return;
+    if (!force && lastSharedDataRefreshAt && Date.now() - lastSharedDataRefreshAt < SHARED_DATA_REFRESH_INTERVAL_MS) return;
     sharedDataRefreshInProgress = true;
     try {
         await syncPendingChangesToConvex();
         const downloaded = await downloadCatalogFromConvex();
         if (downloaded) {
+            lastSharedDataRefreshAt = Date.now();
             renderCategories();
             renderProducts();
             renderCustomers();
+            renderSettlementsTab();
             updateCartCustomerSelect();
         }
     } finally {
@@ -2968,13 +3331,12 @@ async function refreshSharedDataFromServer() {
 // التشغيل المبدئي
 loadAppDatabase().then(() => {
     document.getElementById('currentAppVersion').textContent = `v${APP_VERSION}`;
-    if (navigator.onLine) refreshSharedDataFromServer();
+    if (navigator.onLine) lastSharedDataRefreshAt = Date.now();
     checkForAppUpdate(true);
 });
 
 window.addEventListener('online', async () => {
-    await refreshSharedDataFromServer();
-    cacheProductImagesForOffline();
+    await refreshSharedDataFromServer(true);
     checkForAppUpdate(true);
 });
 
@@ -2986,7 +3348,7 @@ document.addEventListener('visibilitychange', () => {
 
 setInterval(() => {
     if (document.visibilityState === 'visible' && navigator.onLine) refreshSharedDataFromServer();
-}, 60000);
+}, SHARED_DATA_REFRESH_INTERVAL_MS);
 
 setInterval(() => {
     if (document.visibilityState === 'visible' && navigator.onLine) checkForAppUpdate(true);
