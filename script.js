@@ -1,5 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '5.2.0';
+const APP_VERSION = '5.3.0';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
@@ -331,7 +331,7 @@ function normalizeInvoiceForConvex(invoice) {
     const optionalString = (target, key, value) => {
         if (typeof value === 'string') target[key] = value;
     };
-    return {
+    const normalizedInvoice = {
         localId: String(invoice.localId),
         id: Number(invoice.id),
         customer: String(invoice.customer || ''),
@@ -360,6 +360,10 @@ function normalizeInvoiceForConvex(invoice) {
             return normalizedItem;
         })
     };
+    if (typeof invoice.isHiddenFromLedger === 'boolean') {
+        normalizedInvoice.isHiddenFromLedger = invoice.isHiddenFromLedger;
+    }
+    return normalizedInvoice;
 }
 
 async function sendInvoiceSyncItem(client, item) {
@@ -572,7 +576,7 @@ function normalizeDownloadedCategory(category) {
 }
 
 function normalizeDownloadedInvoice(invoice) {
-    return {
+    const normalizedInvoice = {
         localId: String(invoice.localId),
         id: Number(invoice.id),
         customer: String(invoice.customer || ''),
@@ -590,6 +594,10 @@ function normalizeDownloadedInvoice(invoice) {
             qty: Number(item.qty || 0)
         }))
     };
+    if (typeof invoice.isHiddenFromLedger === 'boolean') {
+        normalizedInvoice.isHiddenFromLedger = invoice.isHiddenFromLedger;
+    }
+    return normalizedInvoice;
 }
 
 function normalizeDownloadedCustomer(customer) {
@@ -3089,15 +3097,15 @@ function deleteInvoice(invoiceId) {
     let inv = db.invoices.find(i => i.id == invoiceId);
     if (!inv) return;
     
-    customPrompt("هل أنت متأكد من حذف هذه الفاتورة؟ (نعم/لا)", "لا", async function(val) {
+    customPrompt("هل تريد حذف هذه الفاتورة من القائمة فقط؟ سيبقى مبلغها محسوباً ضمن دين الزبون. (نعم/لا)", "لا", async function(val) {
         if(val === 'نعم') {
             let previousInvoices = JSON.parse(JSON.stringify(db.invoices));
-            db.invoices = db.invoices.filter(i => i.id != invoiceId);
+            inv.isHiddenFromLedger = true;
             try {
-                await saveAppDataAndQueueOperation('invoice', inv.id, 'delete', inv);
+                await saveAppDataAndQueueOperation('invoice', inv.id, 'update', inv);
             } catch (error) {
                 db.invoices = previousInvoices;
-                customAlert('تعذر حفظ حذف الفاتورة محليًا. لم يتم حذف الفاتورة.');
+                customAlert('تعذر حفظ حذف الفاتورة من القائمة. لم يتغير الدين.');
                 return;
             }
             // Refresh ledger if open
@@ -3106,8 +3114,8 @@ function deleteInvoice(invoiceId) {
                 openLedger(ledgerCustomer ? ledgerCustomer.name : inv.customer, ledgerCustomer ? ledgerCustomer.id : undefined);
             }
             customAlert(navigator.onLine
-                ? 'تم حذف الفاتورة بنجاح.'
-                : 'تم حفظ العملية محليًا وستتم مزامنتها لاحقًا.');
+                ? 'تم حذف الفاتورة من القائمة مع إبقاء مبلغها ضمن دين الزبون.'
+                : 'تم حذف الفاتورة من القائمة محليًا مع إبقاء مبلغها ضمن الدين، وستتم المزامنة لاحقًا.');
         }
     });
 }
@@ -3150,7 +3158,9 @@ function openLedger(name, custId) {
         db.customers.find(item => normalizeCustomerNameKey(item.name) === normalizeCustomerNameKey(name)) ||
         { name, localId: '' };
     document.getElementById('ledger-name').innerText = customer.name;
-    let custInvoices = db.invoices.filter(invoice => invoiceBelongsToCustomer(invoice, customer));
+    let custInvoices = db.invoices.filter(invoice =>
+        invoiceBelongsToCustomer(invoice, customer) && !invoice.isHiddenFromLedger
+    );
     let debt = getCustomerOutstandingDebt(customer);
     document.getElementById('ledger-debt').innerText = debt.toLocaleString() + " د.ع";
     

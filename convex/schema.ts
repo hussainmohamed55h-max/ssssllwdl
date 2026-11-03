@@ -28,6 +28,7 @@ export const invoiceFields = {
   statusColor: v.string(),
   total: v.number(),
   items: v.array(invoiceItemValidator),
+  isHiddenFromLedger: v.optional(v.boolean()),
 };
 
 export const productFields = {
