@@ -1,5 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '5.8.0';
+const APP_VERSION = '5.9.0';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
@@ -2834,6 +2834,8 @@ function updateCartCustomerSelect() {
     handleCartCustomerSearch();
 }
 
+let cartCustomerSuggestionsForcedOpen = false;
+
 function chooseCartCustomer(customerLocalId) {
     const customer = db.customers.find(item => String(item.localId) === String(customerLocalId));
     const input = document.getElementById('cart-customer-input');
@@ -2841,7 +2843,10 @@ function chooseCartCustomer(customerLocalId) {
     input.value = customer.name;
     clearCustomerNameWarning();
     const suggestions = document.getElementById('cart-customer-suggestions');
+    const toggleButton = document.getElementById('cart-customer-toggle');
+    cartCustomerSuggestionsForcedOpen = false;
     if (suggestions) suggestions.classList.remove('open');
+    if (toggleButton) toggleButton.setAttribute('aria-expanded', 'false');
 }
 
 function handleCartCustomerSearch() {
@@ -2857,13 +2862,36 @@ function handleCartCustomerSearch() {
     suggestions.innerHTML = matches.length
         ? matches.map(customer => `<button type="button" role="option" onclick="chooseCartCustomer('${customer.localId}')"><strong>${escapeInvoiceHtml(customer.name)}</strong><small>${escapeInvoiceHtml(customer.phone || '')}</small></button>`).join('')
         : '<div class="cart-customer-no-result">لا يوجد زبون مطابق.</div>';
-    suggestions.classList.toggle('open', document.activeElement === input && Boolean(input.value.trim()));
+    const shouldOpen = cartCustomerSuggestionsForcedOpen || (document.activeElement === input && Boolean(input.value.trim()));
+    suggestions.classList.toggle('open', shouldOpen);
+    const toggleButton = document.getElementById('cart-customer-toggle');
+    if (toggleButton) toggleButton.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+}
+
+function toggleCartCustomerSuggestions(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    const input = document.getElementById('cart-customer-input');
+    const suggestions = document.getElementById('cart-customer-suggestions');
+    if (!input || !suggestions) return;
+    cartCustomerSuggestionsForcedOpen = !suggestions.classList.contains('open');
+    if (cartCustomerSuggestionsForcedOpen) {
+        input.focus({ preventScroll: true });
+        handleCartCustomerSearch();
+        return;
+    }
+    suggestions.classList.remove('open');
+    document.getElementById('cart-customer-toggle')?.setAttribute('aria-expanded', 'false');
 }
 
 document.addEventListener('click', event => {
     const group = document.getElementById('cart-customer-group');
     const suggestions = document.getElementById('cart-customer-suggestions');
-    if (group && suggestions && !group.contains(event.target)) suggestions.classList.remove('open');
+    if (group && suggestions && !group.contains(event.target)) {
+        cartCustomerSuggestionsForcedOpen = false;
+        suggestions.classList.remove('open');
+        document.getElementById('cart-customer-toggle')?.setAttribute('aria-expanded', 'false');
+    }
 });
 
 
