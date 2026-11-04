@@ -21,6 +21,7 @@ export const invoiceFields = {
   localId: v.string(),
   id: v.number(),
   customer: v.string(),
+  customerLocalId: v.optional(v.string()),
   phone: v.string(),
   date: v.string(),
   time: v.string(),
@@ -28,6 +29,7 @@ export const invoiceFields = {
   statusColor: v.string(),
   total: v.number(),
   items: v.array(invoiceItemValidator),
+  createdAt: v.optional(v.number()),
   isHiddenFromLedger: v.optional(v.boolean()),
 };
 
@@ -67,6 +69,7 @@ export const customerFields = {
   phone: v.string(),
   address: v.string(),
   debtAdjustment: v.optional(v.number()),
+  archivedDebt: v.optional(v.number()),
   updatedAt: v.number(),
   isDeleted: v.optional(v.boolean()),
 };

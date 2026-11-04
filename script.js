@@ -1,9 +1,13 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '6.0.0';
+const APP_VERSION = '6.1.0';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
 const IDB_SYNC_QUEUE_STORE = 'syncQueue';
+const INVOICE_RETENTION_DAYS = 40;
+const INVOICE_RETENTION_MS = INVOICE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+const INVOICE_RETENTION_CHECK_KEY = 'invoiceRetentionLastCheckAt';
+const INVOICE_RETENTION_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const IDB_VERSION = 3;
 
 function initIndexedDB() {
@@ -195,6 +199,7 @@ function matchesCustomerSearch(customerName, rawQuery) {
 function normalizeCustomerForStorage(customer) {
     const name = String(customer && customer.name || '').trim().replace(/\s+/g, ' ');
     const rawDebtAdjustment = Math.round(Number(customer && customer.debtAdjustment || 0));
+    const rawArchivedDebt = Math.round(Number(customer && customer.archivedDebt || 0));
     return {
         localId: String(customer && customer.localId || createLocalId('customer')),
         id: Number(customer && customer.id || Date.now()),
@@ -203,6 +208,7 @@ function normalizeCustomerForStorage(customer) {
         phone: String(customer && customer.phone || ''),
         address: String(customer && customer.address || ''),
         debtAdjustment: Number.isSafeInteger(rawDebtAdjustment) ? rawDebtAdjustment : 0,
+        archivedDebt: Number.isSafeInteger(rawArchivedDebt) ? rawArchivedDebt : 0,
         updatedAt: Number(customer && customer.updatedAt || customer && customer.id || 0),
         ...(customer && customer.isDeleted ? { isDeleted: true } : {})
     };
@@ -407,6 +413,10 @@ function normalizeInvoiceForConvex(invoice) {
             return normalizedItem;
         })
     };
+    optionalString(normalizedInvoice, 'customerLocalId', invoice.customerLocalId);
+    if (Number.isFinite(Number(invoice.createdAt)) && Number(invoice.createdAt) > 0) {
+        normalizedInvoice.createdAt = Number(invoice.createdAt);
+    }
     if (typeof invoice.isHiddenFromLedger === 'boolean') {
         normalizedInvoice.isHiddenFromLedger = invoice.isHiddenFromLedger;
     }
@@ -642,12 +652,16 @@ function normalizeDownloadedInvoice(invoice) {
         localId: String(invoice.localId),
         id: Number(invoice.id),
         customer: String(invoice.customer || ''),
+        ...(typeof invoice.customerLocalId === 'string' && invoice.customerLocalId
+            ? { customerLocalId: invoice.customerLocalId }
+            : {}),
         phone: String(invoice.phone || ''),
         date: String(invoice.date || ''),
         time: String(invoice.time || ''),
         status: String(invoice.status || ''),
         statusColor: String(invoice.statusColor || ''),
         total: Number(invoice.total || 0),
+        createdAt: Number(invoice.createdAt || invoice._creationTime || 0),
         items: (Array.isArray(invoice.items) ? invoice.items : []).map(item => ({
             ...item,
             id: Number(item.id),
@@ -671,6 +685,7 @@ function normalizeDownloadedCustomer(customer) {
         phone: customer.phone,
         address: customer.address,
         debtAdjustment: customer.debtAdjustment,
+        archivedDebt: customer.archivedDebt,
         updatedAt: customer.updatedAt || customer._creationTime,
         isDeleted: customer.isDeleted
     });
@@ -861,6 +876,25 @@ async function mergeDownloadedCatalog(remoteProducts, remoteDeletedProducts, rem
         }
     });
 
+    const remoteInvoiceLocalIds = new Set(remoteInvoices
+        .filter(invoice => invoice && typeof invoice.localId === 'string')
+        .map(invoice => String(invoice.localId)));
+    const pendingCustomerLocalIds = new Set(pendingItems
+        .filter(item => item.status === 'pending' && item.type === 'customer')
+        .map(item => String(item.payload && item.payload.localId || '')));
+    const pendingCustomerNameKeys = new Set(pendingItems
+        .filter(item => item.status === 'pending' && item.type === 'customer')
+        .map(item => normalizeCustomerNameKey(item.payload && item.payload.name)));
+    const retentionCutoff = Date.now() - INVOICE_RETENTION_MS;
+    db.invoices = db.invoices.filter(invoice => {
+        const localId = String(invoice && invoice.localId || '');
+        if (!localId || remoteInvoiceLocalIds.has(localId) || pendingLocalIds.has(`invoice:${localId}`)) return true;
+        if ((invoice.customerLocalId && pendingCustomerLocalIds.has(String(invoice.customerLocalId))) ||
+            pendingCustomerNameKeys.has(normalizeCustomerNameKey(invoice.customer))) return true;
+        const createdAt = Number(invoice && invoice.createdAt || 0);
+        return !createdAt || createdAt > retentionCutoff;
+    });
+
     mergeDownloadedCustomers(remoteCustomers, pendingItems);
     mergeDownloadedPayments(remotePayments, pendingItems);
     const hasPendingProductOrder = pendingItems.some(item =>
@@ -900,12 +934,37 @@ async function mergeDownloadedCatalog(remoteProducts, remoteDeletedProducts, rem
     }
 }
 
+async function pruneExpiredInvoicesFromConvex(client) {
+    let lastCheckAt = 0;
+    try {
+        lastCheckAt = Number(localStorage.getItem(INVOICE_RETENTION_CHECK_KEY) || 0);
+    } catch (error) {
+        console.warn('تعذر قراءة وقت آخر تنظيف للفواتير.', error);
+    }
+    if (lastCheckAt && Date.now() - lastCheckAt < INVOICE_RETENTION_CHECK_INTERVAL_MS) return;
+
+    try {
+        for (let batch = 0; batch < 50; batch += 1) {
+            const result = await client.mutation(convex.anyApi.invoices.pruneExpiredInvoices, { limit: 100 });
+            if (!result || !result.hasMore) break;
+        }
+        try {
+            localStorage.setItem(INVOICE_RETENTION_CHECK_KEY, String(Date.now()));
+        } catch (error) {
+            console.warn('تعذر حفظ وقت تنظيف الفواتير.', error);
+        }
+    } catch (error) {
+        console.warn('تعذر تنظيف الفواتير الأقدم من 40 يوماً؛ ستتم إعادة المحاولة لاحقاً.', error);
+    }
+}
+
 async function downloadCatalogFromConvex() {
     if (!navigator.onLine || catalogDownloadInProgress) return false;
     catalogDownloadInProgress = true;
     try {
         if (!globalThis.CONVEX_URL || !globalThis.convex || !convex.ConvexHttpClient) return false;
         const client = new convex.ConvexHttpClient(globalThis.CONVEX_URL);
+        await pruneExpiredInvoicesFromConvex(client);
         const [remoteProducts, remoteDeletedProducts, remoteCategories, remoteInvoices, remoteCustomers, remotePayments, remoteProductOrder] = await Promise.all([
             client.query(convex.anyApi.products.getProducts, { limit: 5000 }),
             client.query(convex.anyApi.products.getDeletedProducts, { limit: 5000 }).catch(error => {
@@ -1005,7 +1064,10 @@ async function loadAppDatabase() {
         }
         if (customersNeedMetadata) await queueCustomerSyncBatch(db.customers, 'create');
 
-        if (navigator.onLine) await downloadCatalogFromConvex();
+        if (navigator.onLine) {
+            await syncPendingChangesToConvex();
+            await downloadCatalogFromConvex();
+        }
     } catch(e) { console.error("خطأ في قراءة البيانات", e); }
 
     // التشغيل المبدئي للواجهة بعد اكتمال تحميل البيانات
@@ -2244,7 +2306,11 @@ function getCustomerPaymentTotal(customer, excludedPaymentId = null) {
 }
 
 function getCustomerAdjustedDebtBase(customer) {
-    return Math.max(0, getCustomerGrossDebt(customer) + Number(customer && customer.debtAdjustment || 0));
+    return Math.max(0,
+        getCustomerGrossDebt(customer) +
+        Number(customer && customer.debtAdjustment || 0) +
+        Number(customer && customer.archivedDebt || 0)
+    );
 }
 
 function getCustomerOutstandingDebt(customer) {
@@ -2859,8 +2925,7 @@ function handleCartCustomerSearch() {
     const query = normalizeCustomerSearchText(input.value);
     const matches = [...db.customers]
         .filter(customer => matchesCustomerSearch(customer.name, query))
-        .sort((first, second) => String(first.name).localeCompare(String(second.name), 'ar'))
-        .slice(0, 12);
+        .sort((first, second) => String(first.name).localeCompare(String(second.name), 'ar'));
     suggestions.innerHTML = matches.length
         ? matches.map(customer => `<button type="button" role="option" onclick="chooseCartCustomer('${customer.localId}')"><strong>${escapeInvoiceHtml(customer.name)}</strong><small>${escapeInvoiceHtml(customer.phone || '')}</small></button>`).join('')
         : '<div class="cart-customer-no-result">لا يوجد زبون مطابق.</div>';
@@ -2878,7 +2943,7 @@ function toggleCartCustomerSuggestions(event) {
     if (!input || !suggestions) return;
     cartCustomerSuggestionsForcedOpen = !suggestions.classList.contains('open');
     if (cartCustomerSuggestionsForcedOpen) {
-        input.focus({ preventScroll: true });
+        input.blur();
         handleCartCustomerSearch();
         return;
     }
@@ -3150,13 +3215,13 @@ async function saveOrderAndShowDetails() {
             order.items = [...db.cart];
         } else {
             let orderId = db.invoices.length > 0 ? Math.max(...db.invoices.map(i => parseInt(i.id) || 1000)) + 1 : 1000;
-            order = { localId: createInvoiceLocalId(), id: orderId, customer: custName, ...(customerLocalId ? { customerLocalId } : {}), phone: custPhone, date: dateString, time: timeString, status: status, statusColor: statusColor, total: total, items: [...db.cart] };
+            order = { localId: createInvoiceLocalId(), id: orderId, customer: custName, ...(customerLocalId ? { customerLocalId } : {}), phone: custPhone, date: dateString, time: timeString, status: status, statusColor: statusColor, total: total, createdAt: Date.now(), items: [...db.cart] };
             db.invoices.push(order);
         }
         editingInvoiceId = null;
     } else {
         let orderId = db.invoices.length > 0 ? Math.max(...db.invoices.map(i => parseInt(i.id) || 1000)) + 1 : 1000;
-        order = { localId: createInvoiceLocalId(), id: orderId, customer: custName, ...(customerLocalId ? { customerLocalId } : {}), phone: custPhone, date: dateString, time: timeString, status: status, statusColor: statusColor, total: total, items: [...db.cart] };
+        order = { localId: createInvoiceLocalId(), id: orderId, customer: custName, ...(customerLocalId ? { customerLocalId } : {}), phone: custPhone, date: dateString, time: timeString, status: status, statusColor: statusColor, total: total, createdAt: Date.now(), items: [...db.cart] };
         db.invoices.push(order);
     }
     

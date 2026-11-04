@@ -131,9 +131,9 @@ body.admin-product-reordering { user-select:none; overscroll-behavior:none; }
 .cart-customer-error { display:none; margin-top:7px; padding:8px 10px; border-radius:9px; color:#fff; background:#d90000; font-size:12px; font-weight:800; text-align:center; box-shadow:0 4px 0 #850000; }
 .cart-customer-required.customer-name-missing input { border:3px solid #ff3232 !important; box-shadow:0 0 0 5px rgba(255,50,50,.17), 0 8px 18px rgba(170,0,0,.22); animation:customerFieldShake .52s cubic-bezier(.36,.07,.19,.97); }
 .cart-customer-required.customer-name-missing .cart-customer-error { display:block; animation:customerErrorPop .3s ease-out; }
-.cart-customer-suggestions { display:none; position:absolute; left:0; right:0; bottom:calc(100% + 7px); overflow-x:auto; overflow-y:hidden; z-index:25; padding:6px; border:1px solid var(--primary-green); border-radius:13px; background:var(--card-bg); box-shadow:0 -12px 30px rgba(0,0,0,.28); scrollbar-width:thin; }
-.cart-customer-suggestions.open { display:flex; gap:5px; }
-.cart-customer-suggestions button { width:auto; min-width:150px; max-width:230px; flex:0 0 auto; display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 12px; border:1px solid var(--border-color); border-radius:9px; color:var(--text-light); background:var(--input-bg); text-align:right; cursor:pointer; }
+.cart-customer-suggestions { display:none; position:absolute; left:0; right:0; bottom:calc(100% + 7px); max-height:260px; overflow-x:hidden; overflow-y:auto; z-index:25; padding:6px; border:1px solid var(--primary-green); border-radius:13px; background:var(--card-bg); box-shadow:0 -12px 30px rgba(0,0,0,.28); scrollbar-width:thin; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; }
+.cart-customer-suggestions.open { display:grid; gap:5px; }
+.cart-customer-suggestions button { width:100%; min-width:0; display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 12px; border:1px solid var(--border-color); border-radius:9px; color:var(--text-light); background:var(--input-bg); text-align:right; cursor:pointer; }
 .cart-customer-suggestions button strong { min-width:0; overflow-wrap:anywhere; }
 .cart-customer-suggestions button small { color:var(--text-muted); direction:ltr; }
 .cart-customer-no-result { padding:11px; color:var(--text-muted); text-align:center; }

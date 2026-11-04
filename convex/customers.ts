@@ -26,6 +26,7 @@ export const upsertCustomer = mutation({
     await ctx.db.replace(existing._id, {
       ...args,
       localId: existing.localId,
+      archivedDebt: Number(existing.archivedDebt || 0),
     });
     return existing._id;
   },
