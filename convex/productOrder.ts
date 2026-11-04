@@ -14,17 +14,19 @@ export const upsertProductOrder = mutation({
     const existing = await ctx.db.query("productOrders")
       .withIndex("by_key", q => q.eq("key", args.key)).unique();
 
-    if (existing && existing.updatedAt > args.updatedAt) {
-      return { applied: false, updatedAt: existing.updatedAt };
-    }
+    const serverUpdatedAt = Math.max(
+      Date.now(),
+      Number(existing?.updatedAt ?? 0) + 1,
+    );
+    const serverOrder = { ...args, updatedAt: serverUpdatedAt };
 
     if (existing) {
-      await ctx.db.replace(existing._id, args);
-      return { applied: true, updatedAt: args.updatedAt };
+      await ctx.db.replace(existing._id, serverOrder);
+      return { applied: true, updatedAt: serverUpdatedAt };
     }
 
-    await ctx.db.insert("productOrders", args);
-    return { applied: true, updatedAt: args.updatedAt };
+    await ctx.db.insert("productOrders", serverOrder);
+    return { applied: true, updatedAt: serverUpdatedAt };
   },
 });
 

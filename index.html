@@ -11,7 +11,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="style.css?v=3.0">
+    <link rel="stylesheet" href="style.css?v=5.4.0">
 </head>
 <body class="light-mode">
 
@@ -40,9 +40,10 @@
         </section>
 
         <section id="tab-products" class="tab-content">
-            <div style="display: flex; gap: 10px; margin-bottom: 20px;">
+            <div class="products-admin-actions">
                 <button class="btn-3d" onclick="triggerFlip(this, openAddProductModal)"><i class="fas fa-plus"></i> إضافة منتج</button>
                 <button class="btn-3d btn-blue" onclick="triggerFlip(this, () => openModal('categoryModal'))"><i class="fas fa-folder-plus"></i> إدارة الفئات</button>
+                <button class="btn-3d btn-blue" onclick="triggerFlip(this, changeProductsAdminCode)"><i class="fas fa-key"></i> تغيير رمز المنتجات</button>
             </div>
             <div class="admin-products-heading">
                 <h3>المنتجات الحالية:</h3>
@@ -63,6 +64,13 @@
 
         <section id="tab-customers" class="tab-content">
             <button class="btn-3d" onclick="triggerFlip(this, openAddCustomerModal)" style="margin-bottom: 20px;"><i class="fas fa-user-plus"></i> إضافة زبون</button>
+            <div class="customer-search-box">
+                <label for="customerSearchInput"><i class="fas fa-magnifying-glass"></i> بحث في الزبائن</label>
+                <div class="customer-search-row">
+                    <input type="search" id="customerSearchInput" placeholder="اكتب اسم الزبون من أول حرف..." autocomplete="off" oninput="renderCustomers()">
+                    <button type="button" class="btn-3d btn-blue" onclick="renderCustomers()"><i class="fas fa-magnifying-glass"></i> بحث</button>
+                </div>
+            </div>
             <div id="customers-list">
                 </div>
         </section>
@@ -186,10 +194,11 @@
             <span class="close-btn" onclick="closeModal('addCustomerModal')"><i class="fas fa-times"></i></span>
             <h2 id="customerModalTitle" style="text-align: center; margin-bottom: 20px;">إضافة زبون</h2>
             <input type="hidden" id="editCustId" value="">
-            <div class="input-group"><label>اسم الزبون</label><input type="text" id="newCustName" placeholder="مثال: صيدلية الأمل"></div>
-            <div class="input-group"><label>رقم الهاتف</label><input type="text" id="newCustPhone" placeholder="07xxxxxxxxx"></div>
-            <div class="input-group"><label>العنوان</label><input type="text" id="newCustAddress" placeholder="المدينة، المنطقة..."></div>
-            <button class="btn-3d" onclick="triggerFlip(this, saveCustomer)">حفظ الزبون <i class="fas fa-save"></i></button>
+            <div class="input-group"><label>اسم الزبون</label><input type="text" id="newCustName" placeholder="مثال: صيدلية الأمل" oninput="updateCustomerSaveState()"></div>
+            <div class="input-group"><label>رقم الهاتف</label><input type="text" id="newCustPhone" inputmode="tel" placeholder="07xxxxxxxxx" oninput="updateCustomerSaveState()"></div>
+            <div class="input-group"><label>العنوان</label><input type="text" id="newCustAddress" placeholder="المدينة، المنطقة..." oninput="updateCustomerSaveState()"></div>
+            <div id="customerRequiredHint" class="customer-required-hint">املأ الاسم ورقم الهاتف والعنوان لتفعيل الحفظ.</div>
+            <button id="saveCustomerBtn" class="btn-3d customer-form-save customer-form-save-waiting" type="button" onclick="saveCustomer()">حفظ الزبون <i class="fas fa-save"></i></button>
         </div>
     </div>
 
@@ -204,11 +213,9 @@
             <button class="btn-3d" onclick="closeModal('cartModal')" style="margin-bottom: 15px; background: var(--input-bg); color: var(--text-light); border: 1px dashed var(--primary-green); box-shadow: none;">➕ إضافة منتجات أخرى للسلة</button>
             <div id="cart-items-container" style="min-height: 100px;"></div>
             <div id="cart-customer-group" class="input-group cart-customer-required" style="margin-top: 15px; position: relative;">
-                <input list="cart-customers-list" id="cart-customer-input" placeholder="اختر أو ابحث عن زبون..." aria-required="true" oninput="clearCustomerNameWarning()" style="padding-left: 35px;">
+                <div id="cart-customer-suggestions" class="cart-customer-suggestions" role="listbox"></div>
+                <input id="cart-customer-input" placeholder="اختر أو ابحث عن زبون..." aria-required="true" autocomplete="off" oninput="handleCartCustomerSearch()" onfocus="handleCartCustomerSearch()" style="padding-left: 35px;">
                 <i class="fas fa-chevron-down" style="position: absolute; left: 15px; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none;"></i>
-                <datalist id="cart-customers-list">
-                    <!-- Options populated dynamically -->
-                </datalist>
                 <div id="cart-customer-error" class="cart-customer-error" role="alert">يرجى اختيار اسم الزبون أولاً</div>
             </div>
             <div style="display: flex; justify-content: space-between; background: var(--input-bg); padding: 10px; border-radius: 10px; margin-bottom: 15px; border: 1px solid var(--border-color);">
@@ -308,7 +315,7 @@
             <div class="admin-access-icon"><i class="fas fa-user-shield"></i></div>
             <h2>قسم خاص بالإدارة</h2>
             <p>يرجى إدخال الرمز الإداري للدخول إلى إدارة المنتجات.</p>
-            <input id="productsAdminCode" type="password" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="••••" aria-label="الرمز الإداري">
+            <input id="productsAdminCode" type="password" inputmode="numeric" maxlength="6" autocomplete="off" aria-label="الرمز الإداري">
             <div id="productsAdminError" class="admin-access-error" role="alert"></div>
             <button id="productsAdminConfirm" class="btn-3d admin-access-confirm" type="button" onclick="confirmProductsAdminAccess()">
                 دخول الإدارة <i class="fas fa-arrow-left"></i>
@@ -389,6 +396,6 @@
     <script src="./vendor/convex.browser.bundle.js"></script>
     <script src="./vendor/html2canvas.min.js"></script>
     <script src="./convex-config.js"></script>
-    <script src="script.js?v=5.3.0"></script>
+    <script src="script.js?v=5.4.0"></script>
 </body>
 </html>

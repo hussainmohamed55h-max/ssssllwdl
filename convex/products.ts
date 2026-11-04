@@ -26,6 +26,7 @@ export const updateProduct = mutation({
     const existing = await ctx.db.query("products")
       .withIndex("by_localId", q => q.eq("localId", args.localId)).unique();
     if (!existing) throw new Error("Product not found");
+    if (existing.isDeleted === true) return existing._id;
     const previousStorageId = existing.storageId;
     await ctx.db.replace(existing._id, {
       ...args,
@@ -52,25 +53,46 @@ export const deleteProduct = mutation({
     const existing = await ctx.db.query("products")
       .withIndex("by_localId", q => q.eq("localId", args.localId)).unique();
     if (!existing) return false;
-    const storageId = existing.storageId;
-    await ctx.db.delete(existing._id);
-    if (storageId) {
-      const otherProduct = await ctx.db.query("products")
-        .filter(q => q.eq(q.field("storageId"), storageId)).first();
-      const invoices = await ctx.db.query("invoices").take(5000);
-      const usedByInvoice = invoices.some(invoice =>
-        invoice.items.some(item => item.storageId === storageId)
-      );
-      if (!otherProduct && !usedByInvoice && await ctx.db.system.get(storageId)) {
-        await ctx.storage.delete(storageId);
-      }
-    }
+    await ctx.db.patch(existing._id, {
+      isDeleted: true,
+      updatedAt: Math.max(Date.now(), Number(existing.updatedAt ?? 0) + 1),
+    });
     return true;
+  },
+});
+
+export const deleteProductV2 = mutation({
+  args: productArgs.fields,
+  handler: async (ctx, args) => {
+    const existing = await ctx.db.query("products")
+      .withIndex("by_localId", q => q.eq("localId", args.localId)).unique();
+    const tombstoneUpdatedAt = Math.max(
+      Date.now(),
+      Number(existing?.updatedAt ?? 0) + 1,
+    );
+    const tombstone = {
+      ...args,
+      isDeleted: true,
+      updatedAt: tombstoneUpdatedAt,
+    };
+    if (existing) {
+      await ctx.db.replace(existing._id, tombstone);
+      return existing._id;
+    }
+    return ctx.db.insert("products", tombstone);
   },
 });
 
 export const getProducts = query({
   args: { limit: v.optional(v.number()) },
-  handler: async (ctx, args) => ctx.db.query("products").order("desc")
-    .take(Math.max(1, Math.min(Math.floor(args.limit ?? 1000), 5000))),
+  handler: async (ctx, args) => (await ctx.db.query("products").order("desc")
+    .take(Math.max(1, Math.min(Math.floor(args.limit ?? 1000), 5000))))
+    .filter(product => product.isDeleted !== true),
+});
+
+export const getDeletedProducts = query({
+  args: { limit: v.optional(v.number()) },
+  handler: async (ctx, args) => (await ctx.db.query("products").order("desc")
+    .take(Math.max(1, Math.min(Math.floor(args.limit ?? 1000), 5000))))
+    .filter(product => product.isDeleted === true),
 });

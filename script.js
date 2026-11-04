@@ -1,5 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '5.3.0';
+const APP_VERSION = '5.4.0';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
@@ -71,6 +71,9 @@ function normalizeProductForStorage(product) {
     storedProduct.localId = storedProduct.localId || createLocalId('product');
     storedProduct.updatedAt = Number(storedProduct.updatedAt || 0);
     storedProduct.allowHalfCarton = storedProduct.allowHalfCarton === true;
+    storedProduct.imageScale = Math.min(5, Math.max(1, Number(storedProduct.imageScale) || 1));
+    storedProduct.imagePanX = Number.isFinite(Number(storedProduct.imagePanX)) ? Number(storedProduct.imagePanX) : 0;
+    storedProduct.imagePanY = Number.isFinite(Number(storedProduct.imagePanY)) ? Number(storedProduct.imagePanY) : 0;
     return storedProduct;
 }
 
@@ -144,8 +147,12 @@ function normalizeCustomerNameKey(name) {
 
 function normalizeCustomerSearchText(name) {
     return String(name || '')
-        .normalize('NFKC')
+        .normalize('NFKD')
         .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/gi, '')
+        .replace(/[\u064B-\u065F\u0670\u0640]/g, '')
+        .replace(/[أإآٱ]/g, 'ا')
+        .replace(/ى/g, 'ي')
+        .replace(/ة/g, 'ه')
         .trim()
         .replace(/\s+/g, ' ')
         .toLocaleLowerCase('ar');
@@ -258,7 +265,7 @@ async function saveProductAndQueueOperation(product, action) {
     });
 }
 
-async function deleteProductAndQueueOperation(product) {
+async function deleteProductAndQueueOperation(product, productOrderPayload = null) {
     const idb = await initIndexedDB();
     const queueItem = createSyncQueueItem('product', product.id, 'delete', product);
     return new Promise((resolve, reject) => {
@@ -271,7 +278,11 @@ async function deleteProductAndQueueOperation(product) {
             JSON.parse(JSON.stringify(getAppDataWithoutProducts())),
             'pos_db_abu_amir'
         );
-        transaction.objectStore(IDB_SYNC_QUEUE_STORE).put(queueItem);
+        const queueStore = transaction.objectStore(IDB_SYNC_QUEUE_STORE);
+        queueStore.put(queueItem);
+        if (productOrderPayload) {
+            queueStore.put(createSyncQueueItem('productOrder', 'pos-product-order', 'upsert', productOrderPayload));
+        }
         transaction.oncomplete = () => resolve(queueItem);
         transaction.onerror = () => reject(transaction.error);
         transaction.onabort = () => reject(transaction.error);
@@ -401,7 +412,12 @@ function normalizeProductForConvex(product) {
         mediumUrl: typeof product.mediumUrl === 'string' && !product.mediumUrl.startsWith('data:') ? product.mediumUrl : '',
         deleteUrl: typeof product.deleteUrl === 'string' && !product.deleteUrl.startsWith('data:') ? product.deleteUrl : '',
         updatedAt: Number(product.updatedAt || Date.now()),
-        ...(typeof product.isHidden === 'boolean' ? { isHidden: product.isHidden } : {})
+        ...(typeof product.isHidden === 'boolean' ? { isHidden: product.isHidden } : {}),
+        ...(typeof product.isDeleted === 'boolean' ? { isDeleted: product.isDeleted } : {}),
+        allowHalfCarton: product.allowHalfCarton === true,
+        imageScale: Math.min(5, Math.max(1, Number(product.imageScale) || 1)),
+        imagePanX: Number.isFinite(Number(product.imagePanX)) ? Number(product.imagePanX) : 0,
+        imagePanY: Number.isFinite(Number(product.imagePanY)) ? Number(product.imagePanY) : 0
     };
 }
 
@@ -410,7 +426,11 @@ async function sendProductSyncItem(client, item) {
     if (!item.payload || !item.payload.localId) throw new Error('Product sync item is missing localId');
     if (item.action === 'create') return client.mutation(productApi.createProduct, normalizeProductForConvex(item.payload));
     if (item.action === 'update') return client.mutation(productApi.updateProduct, normalizeProductForConvex(item.payload));
-    if (item.action === 'delete') return client.mutation(productApi.deleteProduct, { localId: String(item.payload.localId) });
+    if (item.action === 'delete') return client.mutation(productApi.deleteProductV2, normalizeProductForConvex({
+        ...item.payload,
+        isDeleted: true,
+        updatedAt: Number(item.payload.updatedAt || Date.now())
+    }));
     throw new Error(`Unsupported product sync action: ${item.action}`);
 }
 
@@ -562,6 +582,11 @@ function normalizeDownloadedProduct(product) {
         mediumUrl: product.mediumUrl,
         deleteUrl: product.deleteUrl,
         ...(typeof product.isHidden === 'boolean' ? { isHidden: product.isHidden } : {}),
+        ...(typeof product.isDeleted === 'boolean' ? { isDeleted: product.isDeleted } : {}),
+        allowHalfCarton: product.allowHalfCarton === true,
+        imageScale: Number(product.imageScale || 1),
+        imagePanX: Number(product.imagePanX || 0),
+        imagePanY: Number(product.imagePanY || 0),
         updatedAt: Number(product.updatedAt || product._creationTime || 0)
     });
 }
@@ -698,7 +723,7 @@ function mergeDownloadedCustomers(remoteCustomers, pendingItems) {
     db.customers = [...newestByName.values()];
 }
 
-async function persistDownloadedCatalog(changedProducts) {
+async function persistDownloadedCatalog(changedProducts, deletedProductIds = []) {
     const idb = await initIndexedDB();
     return new Promise((resolve, reject) => {
         const transaction = idb.transaction([IDB_PRODUCTS_STORE, IDB_STORE], 'readwrite');
@@ -706,6 +731,7 @@ async function persistDownloadedCatalog(changedProducts) {
         changedProducts.forEach(product => {
             productStore.put(JSON.parse(JSON.stringify(normalizeProductForStorage(product))));
         });
+        deletedProductIds.forEach(productId => productStore.delete(Number(productId)));
         transaction.objectStore(IDB_STORE).put(
             JSON.parse(JSON.stringify(getAppDataWithoutProducts())),
             'pos_db_abu_amir'
@@ -716,13 +742,14 @@ async function persistDownloadedCatalog(changedProducts) {
     });
 }
 
-async function mergeDownloadedCatalog(remoteProducts, remoteCategories, remoteInvoices, remoteCustomers, remotePayments, remoteProductOrder, pendingItems) {
+async function mergeDownloadedCatalog(remoteProducts, remoteDeletedProducts, remoteCategories, remoteInvoices, remoteCustomers, remotePayments, remoteProductOrder, pendingItems) {
     const pendingLocalIds = new Set(
         pendingItems
             .filter(item => item.status === 'pending' && ['product', 'category', 'invoice', 'customer'].includes(item.type))
             .map(item => `${item.type}:${item.payload && item.payload.localId}`)
     );
     const previousProducts = JSON.parse(JSON.stringify(db.products));
+    const previousCart = JSON.parse(JSON.stringify(db.cart));
     const previousCategories = JSON.parse(JSON.stringify(db.categories));
     const previousInvoices = JSON.parse(JSON.stringify(db.invoices));
     const previousCustomers = JSON.parse(JSON.stringify(db.customers));
@@ -733,6 +760,7 @@ async function mergeDownloadedCatalog(remoteProducts, remoteCategories, remoteIn
     const categoriesByLocalId = new Map(db.categories.map(category => [category.localId, category]));
     const invoicesByLocalId = new Map(db.invoices.map(invoice => [invoice.localId, invoice]));
     const changedProducts = [];
+    const deletedProductIds = [];
     const seenProductIds = new Set();
     const seenCategoryIds = new Set();
     const seenInvoiceIds = new Set();
@@ -752,6 +780,18 @@ async function mergeDownloadedCatalog(remoteProducts, remoteCategories, remoteIn
             Object.assign(local, downloaded);
             changedProducts.push(local);
         }
+    });
+
+    remoteDeletedProducts.forEach(remote => {
+        if (!remote || typeof remote.localId !== 'string') return;
+        if (pendingLocalIds.has(`product:${remote.localId}`)) return;
+        const local = productsByLocalId.get(remote.localId);
+        if (!local) return;
+        db.products = db.products.filter(product => product !== local);
+        db.cart = db.cart.filter(item => item.id !== local.id);
+        db.posProductOrder = db.posProductOrder.filter(localId => String(localId) !== String(local.localId));
+        productsByLocalId.delete(remote.localId);
+        deletedProductIds.push(local.id);
     });
 
     remoteCategories.forEach(remote => {
@@ -791,10 +831,8 @@ async function mergeDownloadedCatalog(remoteProducts, remoteCategories, remoteIn
     );
     if (remoteProductOrder && !hasPendingProductOrder) {
         const downloadedOrder = normalizeProductOrderPayload(remoteProductOrder);
-        if (downloadedOrder.updatedAt > Number(db.posProductOrderUpdatedAt || 0)) {
-            db.posProductOrder = resolveDownloadedProductOrder(downloadedOrder);
-            db.posProductOrderUpdatedAt = downloadedOrder.updatedAt;
-        }
+        db.posProductOrder = resolveDownloadedProductOrder(downloadedOrder);
+        db.posProductOrderUpdatedAt = downloadedOrder.updatedAt;
     }
     const blockedCustomerNameKeys = new Set([
         ...remoteCustomers
@@ -810,10 +848,11 @@ async function mergeDownloadedCatalog(remoteProducts, remoteCategories, remoteIn
         : [];
 
     try {
-        await persistDownloadedCatalog(changedProducts);
+        await persistDownloadedCatalog(changedProducts, deletedProductIds);
         await queueCustomerSyncBatch(inferredCustomers, 'create');
     } catch (error) {
         db.products = previousProducts;
+        db.cart = previousCart;
         db.categories = previousCategories;
         db.invoices = previousInvoices;
         db.customers = previousCustomers;
@@ -830,8 +869,12 @@ async function downloadCatalogFromConvex() {
     try {
         if (!globalThis.CONVEX_URL || !globalThis.convex || !convex.ConvexHttpClient) return false;
         const client = new convex.ConvexHttpClient(globalThis.CONVEX_URL);
-        const [remoteProducts, remoteCategories, remoteInvoices, remoteCustomers, remotePayments, remoteProductOrder] = await Promise.all([
+        const [remoteProducts, remoteDeletedProducts, remoteCategories, remoteInvoices, remoteCustomers, remotePayments, remoteProductOrder] = await Promise.all([
             client.query(convex.anyApi.products.getProducts, { limit: 5000 }),
+            client.query(convex.anyApi.products.getDeletedProducts, { limit: 5000 }).catch(error => {
+                console.warn('واجهة مزامنة حذف المنتجات غير منشورة بعد.', error);
+                return [];
+            }),
             client.query(convex.anyApi.categories.getCategories, { limit: 5000 }),
             client.query(convex.anyApi.invoices.getInvoices, { limit: 5000 }),
             client.query(convex.anyApi.customers.getCustomers, { limit: 5000 }),
@@ -845,6 +888,7 @@ async function downloadCatalogFromConvex() {
         const pendingItems = await getPendingSyncItems();
         await mergeDownloadedCatalog(
             remoteProducts,
+            remoteDeletedProducts,
             remoteCategories,
             remoteInvoices,
             remoteCustomers,
@@ -1051,11 +1095,35 @@ function editCategory(id) {
     });
 }
 
-const PRODUCTS_ADMIN_CODE = '1001';
+const DEFAULT_PRODUCTS_ADMIN_CODE = '200416';
+const PRODUCTS_ADMIN_CODE_STORAGE_KEY = 'pos_products_admin_code';
 const DEFAULT_APP_LOCK_CODE = '121';
 const APP_LOCK_STORAGE_KEY = 'pos_app_locked';
 const APP_LOCK_CODE_STORAGE_KEY = 'pos_app_lock_code';
 let productsAdminNavElement = null;
+
+function getProductsAdminCode() {
+    const storedCode = String(localStorage.getItem(PRODUCTS_ADMIN_CODE_STORAGE_KEY) || '');
+    return /^\d{6}$/.test(storedCode) ? storedCode : DEFAULT_PRODUCTS_ADMIN_CODE;
+}
+
+function changeProductsAdminCode() {
+    customPrompt('أدخل الرمز الجديد المكوّن من 6 أرقام:', '', value => {
+        const newCode = String(value || '').trim();
+        if (!/^\d{6}$/.test(newCode)) {
+            customAlert('يجب أن يتكون رمز المنتجات من 6 أرقام.');
+            return;
+        }
+        customPrompt('أعد إدخال الرمز الجديد للتأكيد:', '', confirmation => {
+            if (String(confirmation || '').trim() !== newCode) {
+                customAlert('الرمزان غير متطابقين. لم يتم تغيير الرمز.');
+                return;
+            }
+            localStorage.setItem(PRODUCTS_ADMIN_CODE_STORAGE_KEY, newCode);
+            customAlert('تم تغيير رمز إدارة المنتجات بنجاح.');
+        });
+    });
+}
 
 function getApplicationLockCode() {
     return localStorage.getItem(APP_LOCK_CODE_STORAGE_KEY) || DEFAULT_APP_LOCK_CODE;
@@ -1141,7 +1209,7 @@ function confirmProductsAdminAccess() {
     const input = document.getElementById('productsAdminCode');
     const error = document.getElementById('productsAdminError');
     const card = document.getElementById('productsAdminCard');
-    if (input.value === PRODUCTS_ADMIN_CODE) {
+    if (input.value === getProductsAdminCode()) {
         const navElement = productsAdminNavElement;
         closeProductsAdminAccess();
         switchTab('tab-products', navElement);
@@ -1158,6 +1226,16 @@ function confirmProductsAdminAccess() {
 document.getElementById('productsAdminCode').addEventListener('keydown', event => {
     if (event.key === 'Enter') confirmProductsAdminAccess();
 });
+document.getElementById('productsAdminCode').addEventListener('input', event => {
+    event.target.value = event.target.value.replace(/\D/g, '').slice(0, 6);
+});
+
+document.getElementById('tab-products').addEventListener('wheel', event => {
+    const productsTab = event.currentTarget;
+    if (!productsTab.classList.contains('active') || Math.abs(event.deltaY) < 1) return;
+    event.preventDefault();
+    productsTab.scrollBy({ top: event.deltaY * 0.65, behavior: 'auto' });
+}, { passive: false });
 
 function filterProducts(category, element) {
     activeCategoryFilter = category;
@@ -1249,6 +1327,13 @@ function getProductMediumImageUrl(product) {
             ? product.imageUrl
         : '';
     return imageUrl || PRODUCT_IMAGE_PLACEHOLDER;
+}
+
+function getProductImageTransformStyle(product) {
+    const scale = Math.min(5, Math.max(1, Number(product && product.imageScale) || 1));
+    const panX = Number.isFinite(Number(product && product.imagePanX)) ? Number(product.imagePanX) : 0;
+    const panY = Number.isFinite(Number(product && product.imagePanY)) ? Number(product.imagePanY) : 0;
+    return `transform:translate(${panX}%, ${panY}%) scale(${scale});transform-origin:center center;`;
 }
 
 function setProductImageUploadStatus(message, isError = false) {
@@ -1500,6 +1585,9 @@ function openAddProductModal() {
     clearProductImagePreviewObjectUrl();
     currentUploadImage = null;
     selectedProductImageFile = null;
+    imgScale = 1;
+    imgPanX = 0;
+    imgPanY = 0;
     document.getElementById('imageZoomContainer').style.display = 'none';
     document.getElementById('productModalTitle').innerText = 'إضافة منتج';
     document.getElementById('editProdId').value = '';
@@ -1548,14 +1636,14 @@ function openEditProduct(id) {
     setProductImageUploadStatus('');
     document.getElementById('newProdImg').value = '';
     if(tempProductImageUrl) {
+        imgScale = Math.min(5, Math.max(1, Number(p.imageScale) || 1));
+        imgPanX = Number.isFinite(Number(p.imagePanX)) ? Number(p.imagePanX) : 0;
+        imgPanY = Number.isFinite(Number(p.imagePanY)) ? Number(p.imagePanY) : 0;
         let img = new Image();
         img.onload = function() {
             currentUploadImage = img;
-            imgScale = 1;
-            imgPanX = 0;
-            imgPanY = 0;
             document.getElementById('imageZoomContainer').style.display = 'flex';
-            document.getElementById('imgZoomSlider').value = 1;
+            document.getElementById('imgZoomSlider').value = imgScale;
             updateImagePreview();
         };
         img.src = getProductMediumImageUrl(p);
@@ -1592,6 +1680,10 @@ async function saveProduct() {
         p.thumbUrl = tempProductThumbUrl;
         p.mediumUrl = tempProductMediumUrl;
         p.deleteUrl = tempProductDeleteUrl;
+        p.imageScale = imgScale;
+        p.imagePanX = imgPanX;
+        p.imagePanY = imgPanY;
+        p.isDeleted = false;
         p.updatedAt = Date.now();
         delete p.img;
         
@@ -1632,6 +1724,10 @@ async function saveProduct() {
             thumbUrl: tempProductThumbUrl,
             mediumUrl: tempProductMediumUrl,
             deleteUrl: tempProductDeleteUrl,
+            imageScale: imgScale,
+            imagePanX: imgPanX,
+            imagePanY: imgPanY,
+            isDeleted: false,
             updatedAt: Date.now()
         };
         db.products.push(product);
@@ -1664,14 +1760,27 @@ async function confirmDeleteProduct(id) {
     if (!product) return;
     const previousProducts = JSON.parse(JSON.stringify(db.products));
     const previousCart = JSON.parse(JSON.stringify(db.cart));
+    const previousOrder = [...db.posProductOrder];
+    const previousOrderUpdatedAt = Number(db.posProductOrderUpdatedAt || 0);
+    const deletedProduct = { ...product, isDeleted: true, updatedAt: Date.now() };
     db.products = db.products.filter(p => p.id != id);
     db.cart = db.cart.filter(c => c.id != id);
+    db.posProductOrder = db.posProductOrder.filter(localId => String(localId) !== String(product.localId));
+    db.posProductOrderUpdatedAt = Date.now();
     try {
-        await deleteProductAndQueueOperation(product);
+        const remainingByLocalId = new Map(db.products.map(item => [String(item.localId), item]));
+        const productOrderPayload = normalizeProductOrderPayload({
+            productLocalIds: db.posProductOrder,
+            productIds: db.posProductOrder.map(localId => remainingByLocalId.get(String(localId))).filter(Boolean).map(item => Number(item.id)),
+            updatedAt: db.posProductOrderUpdatedAt
+        });
+        await deleteProductAndQueueOperation(deletedProduct, productOrderPayload);
         syncChangesIfOnline();
     } catch (error) {
         db.products = previousProducts;
         db.cart = previousCart;
+        db.posProductOrder = previousOrder;
+        db.posProductOrderUpdatedAt = previousOrderUpdatedAt;
         customAlert('تعذر حفظ حذف المنتج محليًا.');
         return;
     }
@@ -1701,6 +1810,14 @@ function getOrderedPosProducts() {
     });
 }
 
+function getAdminOrderedProducts() {
+    const orderedProducts = getOrderedPosProducts();
+    return [
+        ...orderedProducts.filter(product => product.isHidden !== true),
+        ...orderedProducts.filter(product => product.isHidden === true)
+    ];
+}
+
 let adminProductDragState = null;
 
 function applyProductOrderToSalesGrid() {
@@ -1721,15 +1838,20 @@ async function saveAdminProductOrder() {
     const previousOrder = [...db.posProductOrder];
     const previousUpdatedAt = Number(db.posProductOrderUpdatedAt || 0);
     const productsById = new Map(db.products.map(product => [String(product.id), product]));
-    const orderedLocalIds = [...adminGrid.querySelectorAll('.admin-product-card')]
+    const orderedUnlockedLocalIds = [...adminGrid.querySelectorAll('.admin-product-card')]
         .map(card => productsById.get(String(card.dataset.productId)))
-        .filter(Boolean)
+        .filter(product => product && product.isHidden !== true)
         .map(product => String(product.localId));
-    const orderedSet = new Set(orderedLocalIds);
-    const missingLocalIds = getOrderedPosProducts()
+    const originalOrder = getOrderedPosProducts();
+    let unlockedIndex = 0;
+    const restoredOrder = originalOrder.map(product => product.isHidden === true
+        ? String(product.localId)
+        : orderedUnlockedLocalIds[unlockedIndex++]).filter(Boolean);
+    const restoredSet = new Set(restoredOrder);
+    const missingLocalIds = db.products
         .map(product => String(product.localId))
-        .filter(localId => !orderedSet.has(localId));
-    db.posProductOrder = [...orderedLocalIds, ...missingLocalIds];
+        .filter(localId => !restoredSet.has(localId));
+    db.posProductOrder = [...restoredOrder, ...missingLocalIds];
     db.posProductOrderUpdatedAt = Date.now();
     const productsByLocalId = new Map(db.products.map(product => [String(product.localId), product]));
     const orderedProductIds = db.posProductOrder
@@ -1872,6 +1994,7 @@ function renderProducts() {
     let posGridHtml = '';
     let adminGridHtml = '';
     const orderedPosProducts = getOrderedPosProducts();
+    const adminOrderedProducts = getAdminOrderedProducts();
     const filteredPosProducts = orderedPosProducts.filter(product => {
         if (product.isHidden) return false;
         if (activeCategoryFilter !== 'الكل' && product.category !== activeCategoryFilter) return false;
@@ -1881,7 +2004,7 @@ function renderProducts() {
     });
     let posHasProducts = filteredPosProducts.length > 0;
 
-    orderedPosProducts.forEach(p => {
+    adminOrderedProducts.forEach(p => {
         let catBadge = p.category ? `<div style="font-size:11px; color:var(--text-muted); margin-bottom:5px;">${p.category}</div>` : '';
         let halfCartonBadge = p.allowHalfCarton ? '<div class="half-carton-badge"><i class="fas fa-box-open"></i> تنقيص النصف مفعّل</div>' : '';
         let isLocked = p.isHidden ? true : false;
@@ -1894,7 +2017,7 @@ function renderProducts() {
                 <div style="position: absolute; top: 12px; left: 12px; z-index: 2; background: rgba(0,0,0,0.5); border-radius: 50%; width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; cursor: pointer; color: ${lockColor}; font-size: 12px;" onclick="toggleProductLock(${p.id})">
                     <i class="fas ${lockIcon}"></i>
                 </div>
-                <img src="${getProductImageUrl(p)}" alt="صورة" loading="lazy" style="width: 100%; height: auto; aspect-ratio: 1/1; object-fit: cover; border-radius: 8px; opacity: ${imgOpacity}; transition: opacity 0.3s;">
+                <div class="product-image-frame" style="opacity:${imgOpacity};"><img src="${getProductImageUrl(p)}" alt="صورة" loading="lazy" style="${getProductImageTransformStyle(p)}"></div>
                 <h3 style="font-size: 13px; margin: 5px 0; opacity: ${imgOpacity}; transition: opacity 0.3s;">${p.name}</h3>
                 <div style="opacity: ${imgOpacity}; transition: opacity 0.3s;">${catBadge}</div>
                 <div style="opacity: ${imgOpacity}; transition: opacity 0.3s;">${halfCartonBadge}</div>
@@ -1903,9 +2026,9 @@ function renderProducts() {
                     <button class="btn-3d btn-blue" style="flex: 1; padding: 6px; font-size: 12px;" onclick="triggerFlip(this, () => openEditProduct(${p.id}))"><i class="fas fa-pen"></i></button>
                     <button class="btn-3d btn-red" style="flex: 1; padding: 6px; font-size: 12px;" onclick="triggerFlip(this, () => deleteProduct(${p.id}))"><i class="fas fa-trash"></i></button>
                 </div>
-                <button type="button" class="admin-order-handle" aria-label="اسحب لترتيب المنتج" onpointerdown="startAdminProductDrag(event, '${p.id}')">
-                    <i class="fas fa-grip-lines"></i><span>اسحب للترتيب</span>
-                </button>
+                ${isLocked
+                    ? '<button type="button" class="admin-order-handle admin-order-handle-locked" disabled><i class="fas fa-lock"></i><span>المنتج مقفل</span></button>'
+                    : `<button type="button" class="admin-order-handle" aria-label="اسحب لترتيب المنتج" onpointerdown="startAdminProductDrag(event, '${p.id}')"><i class="fas fa-grip-lines"></i><span>اسحب للترتيب</span></button>`}
             </div>`;
 
     });
@@ -1919,7 +2042,7 @@ function renderProducts() {
         posGridHtml += `
             <div class="card pos-product-card" data-product-id="${p.id}" style="position:relative; display:flex; flex-direction:column; justify-content:space-between; padding:8px;">
                 <div style="background: transparent; border: none; padding: 0; margin: 0; width: 100%; text-align: right; color: inherit; flex: 1; user-select: none; display: block;">
-                    <img src="${getProductImageUrl(p)}" alt="صورة" loading="lazy" style="pointer-events: none; width: 100%; height: auto; aspect-ratio: 1/1; object-fit: cover; border-radius: 8px;">
+                    <div class="product-image-frame"><img src="${getProductImageUrl(p)}" alt="صورة" loading="lazy" style="pointer-events:none;${getProductImageTransformStyle(p)}"></div>
                     <div class="pos-product-title-row">
                         <h3 style="pointer-events: none; font-size: 13px; margin: 5px 0;">${p.name}</h3>
                         <span class="product-half-toggle-slot">${halfCartonToggleHtml}</span>
@@ -2031,6 +2154,7 @@ function openAddCustomerModal() {
     document.getElementById('newCustName').value = '';
     document.getElementById('newCustPhone').value = '';
     document.getElementById('newCustAddress').value = '';
+    updateCustomerSaveState();
     openModal('addCustomerModal');
 }
 
@@ -2043,7 +2167,23 @@ function editCustomer(id, event) {
     document.getElementById('newCustName').value = c.name;
     document.getElementById('newCustPhone').value = c.phone || '';
     document.getElementById('newCustAddress').value = c.address || '';
+    updateCustomerSaveState();
     openModal('addCustomerModal');
+}
+
+function updateCustomerSaveState() {
+    const name = document.getElementById('newCustName')?.value.trim();
+    const phone = document.getElementById('newCustPhone')?.value.trim();
+    const address = document.getElementById('newCustAddress')?.value.trim();
+    const ready = Boolean(name && phone && address);
+    const button = document.getElementById('saveCustomerBtn');
+    const hint = document.getElementById('customerRequiredHint');
+    if (button) {
+        button.classList.toggle('customer-form-save-waiting', !ready);
+        button.dataset.ready = ready ? 'true' : 'false';
+    }
+    if (hint) hint.classList.toggle('ready', ready);
+    return ready;
 }
 
 function deleteCustomer(id, event) {
@@ -2077,7 +2217,12 @@ async function saveCustomer() {
     let name = document.getElementById('newCustName').value.trim().replace(/\s+/g, ' ');
     let phone = document.getElementById('newCustPhone').value.trim();
     let address = document.getElementById('newCustAddress').value.trim();
-    if(!name) { customAlert('يرجى إدخال اسم الزبون.'); return; }
+    if (!name || !phone || !address) {
+        updateCustomerSaveState();
+        const missingFields = [!name && 'الاسم', !phone && 'رقم الهاتف', !address && 'العنوان'].filter(Boolean);
+        customAlert(`أكمل الحقول المطلوبة: ${missingFields.join('، ')}.`);
+        return;
+    }
     const previousCustomers = JSON.parse(JSON.stringify(db.customers));
     const previousInvoices = JSON.parse(JSON.stringify(db.invoices));
     let editId = document.getElementById('editCustId').value;
@@ -2129,6 +2274,8 @@ async function saveCustomer() {
 
 function renderCustomers() {
     const list = document.getElementById('customers-list'); 
+    const searchInput = document.getElementById('customerSearchInput');
+    const query = normalizeCustomerSearchText(searchInput ? searchInput.value : '');
     
     if(db.customers.length === 0) { 
         list.innerHTML = '<p style="text-align: center; color: var(--text-muted);">لا يوجد زبائن حالياً.</p>'; 
@@ -2145,7 +2292,9 @@ function renderCustomers() {
         if (invoiceOrder > currentOrder) latestInvoiceByCustomer.set(invoiceKey, invoiceOrder);
     });
 
-    const orderedCustomers = [...db.customers].sort((first, second) => {
+    const orderedCustomers = [...db.customers].filter(customer =>
+        !query || normalizeCustomerSearchText(customer.name).startsWith(query)
+    ).sort((first, second) => {
         const firstSaleOrder = Math.max(
             latestInvoiceByCustomer.get(`id:${first.localId}`) ?? -1,
             latestInvoiceByCustomer.get(`name:${normalizeCustomerNameKey(first.name)}`) ?? -1
@@ -2159,6 +2308,11 @@ function renderCustomers() {
         if (creationOrder !== 0) return creationOrder;
         return String(first.name || '').localeCompare(String(second.name || ''), 'ar');
     });
+
+    if (!orderedCustomers.length) {
+        list.innerHTML = '<p style="text-align:center;color:var(--text-muted);">لا يوجد زبون مطابق للبحث.</p>';
+        return;
+    }
 
     let listHtml = '';
     orderedCustomers.forEach((c, index) => {
@@ -2450,8 +2604,8 @@ function buildSettlementStatementPreviewHtml(customer) {
     return `
     <html dir="rtl" lang="ar"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>كشف تسديدات - ${escapeInvoiceHtml(customer.name)}</title>
     <style>
-        *{box-sizing:border-box}body{margin:0;padding:10px;background:#f3f4f6;color:#111;font-family:Arial,sans-serif;font-size:14px}.preview-actions{position:sticky;top:0;z-index:10;display:flex;gap:8px;padding:10px;margin:0 auto 10px;max-width:900px;background:rgba(255,255,255,.96);box-shadow:0 2px 10px rgba(0,0,0,.12)}.preview-actions button{width:100%;border:0;border-radius:10px;padding:13px;color:#fff;background:#087fce;font:700 16px Arial,sans-serif}.preview-actions .share-button{background:#21b861}.settlement-sheet{width:100%;max-width:900px;margin:0 auto;padding:20px;background:#fff}.header-info{text-align:center;margin-bottom:20px}.header-info h1{margin:0;font-size:24px}.header-info p{margin:5px 0}hr{border:0;border-top:2px dashed #ddd;margin:20px 0}h2{text-align:center}.statement-customer{font-size:16px}.statement-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:16px 0}.statement-summary div{display:flex;flex-direction:column;gap:5px;padding:12px;border:1px solid #ddd;border-radius:9px;text-align:center}.statement-summary span{font-size:12px;color:#555}.statement-summary strong{font-size:17px}table{width:100%;border-collapse:collapse;margin-top:20px;text-align:center}th{background:#f2f2f2;border:1px solid #ddd;padding:10px}td{border:1px solid #ddd;padding:8px}.statement-total{text-align:left;margin-top:20px}@media(max-width:520px){body{padding:4px}.settlement-sheet{padding:12px 8px}.header-info h1{font-size:20px}.statement-summary{grid-template-columns:1fr}.settlement-sheet table{font-size:12px}th,td{padding:6px 3px}}@media print{body{padding:0;background:#fff}.preview-actions{display:none}.settlement-sheet{max-width:none;padding:0}}
-    </style></head><body><div class="preview-actions"><button type="button" class="share-button" id="shareSettlementButton">مشاركة PDF</button><button type="button" onclick="window.print()">طباعة / حفظ PDF</button></div>${buildSettlementStatementSheetHtml(customer)}</body></html>`;
+        *{box-sizing:border-box}body{margin:0;padding:10px;background:#f3f4f6;color:#111;font-family:Arial,sans-serif;font-size:14px}.preview-actions{position:sticky;top:0;z-index:10;display:flex;gap:8px;padding:10px;margin:0 auto 10px;max-width:900px;background:rgba(255,255,255,.96);box-shadow:0 2px 10px rgba(0,0,0,.12)}.preview-actions button{width:100%;border:0;border-radius:10px;padding:13px;color:#fff;background:#087fce;font:700 16px Arial,sans-serif}.preview-actions .share-button{background:#21b861}.preview-actions .back-button{background:#555}.settlement-sheet{width:100%;max-width:900px;margin:0 auto;padding:20px;background:#fff}.header-info{text-align:center;margin-bottom:20px}.header-info h1{margin:0;font-size:24px}.header-info p{margin:5px 0}hr{border:0;border-top:2px dashed #ddd;margin:20px 0}h2{text-align:center}.statement-customer{font-size:16px}.statement-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:16px 0}.statement-summary div{display:flex;flex-direction:column;gap:5px;padding:12px;border:1px solid #ddd;border-radius:9px;text-align:center}.statement-summary span{font-size:12px;color:#555}.statement-summary strong{font-size:17px}table{width:100%;border-collapse:collapse;margin-top:20px;text-align:center}th{background:#f2f2f2;border:1px solid #ddd;padding:10px}td{border:1px solid #ddd;padding:8px}.statement-total{text-align:left;margin-top:20px}@media(max-width:520px){body{padding:4px}.preview-actions{flex-wrap:wrap}.preview-actions button{flex:1 1 30%}.settlement-sheet{padding:12px 8px}.header-info h1{font-size:20px}.statement-summary{grid-template-columns:1fr}.settlement-sheet table{font-size:12px}th,td{padding:6px 3px}}@media print{body{padding:0;background:#fff}.preview-actions{display:none}.settlement-sheet{max-width:none;padding:0}}
+    </style></head><body><div class="preview-actions"><button type="button" class="back-button" id="backToSettlementAppButton">رجوع للبرنامج</button><button type="button" class="share-button" id="shareSettlementButton">مشاركة PDF</button><button type="button" onclick="window.print()">طباعة / حفظ PDF</button></div>${buildSettlementStatementSheetHtml(customer)}</body></html>`;
 }
 
 function exportSettlementPDF(customerLocalId) {
@@ -2465,6 +2619,10 @@ function exportSettlementPDF(customerLocalId) {
     printWindow.document.write(buildSettlementStatementPreviewHtml(customer));
     printWindow.document.close();
     printWindow.document.getElementById('shareSettlementButton').onclick = () => shareSettlementPdf(customer, printWindow);
+    printWindow.document.getElementById('backToSettlementAppButton').onclick = () => {
+        printWindow.close();
+        window.focus();
+    };
 }
 
 async function shareSettlementPdf(customer, previewWindow = window) {
@@ -2501,11 +2659,40 @@ async function shareSettlementPdf(customer, previewWindow = window) {
 }
 
 function updateCartCustomerSelect() {
-    let datalist = document.getElementById('cart-customers-list');
-    let html = '';
-    db.customers.forEach(c => { html += `<option value="${c.name}"></option>`; });
-    if(datalist) datalist.innerHTML = html;
+    handleCartCustomerSearch();
 }
+
+function chooseCartCustomer(customerLocalId) {
+    const customer = db.customers.find(item => String(item.localId) === String(customerLocalId));
+    const input = document.getElementById('cart-customer-input');
+    if (!customer || !input) return;
+    input.value = customer.name;
+    clearCustomerNameWarning();
+    const suggestions = document.getElementById('cart-customer-suggestions');
+    if (suggestions) suggestions.classList.remove('open');
+}
+
+function handleCartCustomerSearch() {
+    const input = document.getElementById('cart-customer-input');
+    const suggestions = document.getElementById('cart-customer-suggestions');
+    if (!input || !suggestions) return;
+    clearCustomerNameWarning();
+    const query = normalizeCustomerSearchText(input.value);
+    const matches = [...db.customers]
+        .filter(customer => !query || normalizeCustomerSearchText(customer.name).startsWith(query))
+        .sort((first, second) => String(first.name).localeCompare(String(second.name), 'ar'))
+        .slice(0, 12);
+    suggestions.innerHTML = matches.length
+        ? matches.map(customer => `<button type="button" role="option" onclick="chooseCartCustomer('${customer.localId}')"><strong>${escapeInvoiceHtml(customer.name)}</strong><small>${escapeInvoiceHtml(customer.phone || '')}</small></button>`).join('')
+        : '<div class="cart-customer-no-result">لا يوجد زبون مطابق.</div>';
+    suggestions.classList.toggle('open', document.activeElement === input && Boolean(input.value.trim()));
+}
+
+document.addEventListener('click', event => {
+    const group = document.getElementById('cart-customer-group');
+    const suggestions = document.getElementById('cart-customer-suggestions');
+    if (group && suggestions && !group.contains(event.target)) suggestions.classList.remove('open');
+});
 
 
 // ==========================================
@@ -2889,6 +3076,7 @@ function buildInvoicePreviewHtml(order) {
             .preview-actions button{flex:1; border:0; border-radius:10px; padding:13px 10px; color:#fff; font:700 16px Arial,sans-serif; cursor:pointer;}
             .share-button{background:#21b861;}
             .print-button{background:#087fce;}
+            .back-button{background:#555;}
             .invoice-sheet{width:100%; max-width:900px; margin:0 auto; padding:20px; background:#fff;}
             .header-info{text-align:center; margin-bottom:20px;}
             .header-info h1{margin:0; font-size:24px;}
@@ -2909,6 +3097,7 @@ function buildInvoicePreviewHtml(order) {
     </head>
     <body>
         <div class="preview-actions">
+            <button type="button" class="back-button" id="backToAppButton">رجوع للبرنامج</button>
             <button type="button" class="share-button" id="shareInvoiceButton">مشاركة PDF</button>
             <button type="button" class="print-button" onclick="window.print()">طباعة / حفظ PDF</button>
         </div>
@@ -3034,6 +3223,10 @@ function openInvoicePrintDialog(order) {
     printWindow.document.write(buildInvoicePreviewHtml(order));
     printWindow.document.close();
     printWindow.document.getElementById('shareInvoiceButton').onclick = () => shareInvoicePdf(order, printWindow);
+    printWindow.document.getElementById('backToAppButton').onclick = () => {
+        printWindow.close();
+        window.focus();
+    };
 }
 
 async function shareInvoicePdf(order, previewWindow = window) {
@@ -3315,7 +3508,9 @@ async function applyAppUpdate() {
     }
 }
 
-const SHARED_DATA_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
+// Keep shared additions/deletions responsive across devices while the app is open.
+// One minute avoids the long delays caused by mobile browsers throttling background timers.
+const SHARED_DATA_REFRESH_INTERVAL_MS = 60 * 1000;
 let sharedDataRefreshInProgress = false;
 let lastSharedDataRefreshAt = 0;
 async function refreshSharedDataFromServer(force = false) {
@@ -3352,8 +3547,12 @@ window.addEventListener('online', async () => {
 
 document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible' || !navigator.onLine) return;
-    refreshSharedDataFromServer();
+    refreshSharedDataFromServer(true);
     checkForAppUpdate(true);
+});
+
+window.addEventListener('pageshow', () => {
+    if (navigator.onLine) refreshSharedDataFromServer(true);
 });
 
 setInterval(() => {

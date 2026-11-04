@@ -44,6 +44,11 @@ export const productFields = {
   mediumUrl: v.string(),
   deleteUrl: v.string(),
   isHidden: v.optional(v.boolean()),
+  isDeleted: v.optional(v.boolean()),
+  allowHalfCarton: v.optional(v.boolean()),
+  imageScale: v.optional(v.number()),
+  imagePanX: v.optional(v.number()),
+  imagePanY: v.optional(v.number()),
   updatedAt: v.optional(v.number()),
 };
 
