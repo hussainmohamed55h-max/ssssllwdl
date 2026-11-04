@@ -155,6 +155,8 @@ body.admin-product-reordering { user-select:none; overscroll-behavior:none; }
 .order-item-row { display: flex; justify-content: space-between; font-size: 13px; color: var(--text-light); margin-bottom: 8px; }
 .ledger-box { background: var(--input-bg); padding: 15px; border-radius: 10px; margin-bottom: 15px; text-align: center; border: 1px solid var(--border-color); }
 .ledger-box h2 { color: #ff4d4d; }
+.ledger-debt-heading { display:flex; align-items:center; justify-content:center; gap:9px; }
+.ledger-debt-heading p { margin:0; }
 .invoice-row { display: flex; justify-content: space-between; background: var(--input-bg); padding: 15px; border-radius: 10px; margin-bottom: 10px; align-items: center; border: 1px solid var(--border-color); }
 
 .settlement-search-box { display:grid; gap:8px; margin-bottom:12px; }

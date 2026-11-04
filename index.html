@@ -11,7 +11,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="style.css?v=5.7.0">
+    <link rel="stylesheet" href="style.css?v=5.8.0">
 </head>
 <body class="light-mode">
 
@@ -273,7 +273,10 @@
         <div class="modal-content">
             <span class="close-btn" onclick="closeModal('customerLedgerModal')"><i class="fas fa-times"></i></span>
             <h2 style="text-align: center; margin-bottom: 10px;" id="ledger-name">اسم الزبون</h2>
-            <div class="ledger-box"><p>إجمالي الديون المتبقية:</p><h2 id="ledger-debt">0 د.ع</h2></div>
+            <div class="ledger-box">
+                <div class="ledger-debt-heading"><p>إجمالي الديون المتبقية:</p><button class="settlement-debt-edit" type="button" onclick="requestLedgerDebtEdit()" aria-label="تعديل الدين الكلي"><i class="fas fa-pen"></i></button></div>
+                <h2 id="ledger-debt">0 د.ع</h2>
+            </div>
             <div id="ledger-invoices"></div>
         </div>
     </div>
@@ -399,6 +402,6 @@
     <script src="./vendor/convex.browser.bundle.js"></script>
     <script src="./vendor/html2canvas.min.js"></script>
     <script src="./convex-config.js"></script>
-    <script src="script.js?v=5.7.0"></script>
+    <script src="script.js?v=5.8.0"></script>
 </body>
 </html>

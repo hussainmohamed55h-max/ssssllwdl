@@ -1,5 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '5.7.0';
+const APP_VERSION = '5.8.0';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
@@ -2491,8 +2491,8 @@ function selectSettlementCustomer(customerLocalId) {
     renderSettlementWorkspace();
 }
 
-function requestSettlementDebtEdit() {
-    const customer = findSettlementCustomer();
+function requestCustomerDebtEdit(customerLocalId) {
+    const customer = db.customers.find(item => String(item.localId) === String(customerLocalId));
     if (!customer) {
         customAlert('اختر زبوناً أولاً.');
         return;
@@ -2526,11 +2526,22 @@ function requestSettlementDebtEdit() {
             }
             renderSettlementWorkspace();
             renderCustomers();
+            if (String(activeLedgerCustomerLocalId) === String(customer.localId) && document.getElementById('customerLedgerModal').style.display === 'flex') {
+                openLedger(customer.name, customer.id);
+            }
             customAlert(navigator.onLine
                 ? 'تم تعديل الدين الكلي وحفظه بنجاح.'
                 : 'تم تعديل الدين الكلي محلياً، وستتم مزامنته عند توفر الإنترنت.');
         }, { inputMode: 'numeric' });
     }, { type: 'password', inputMode: 'numeric', maxLength: 6 });
+}
+
+function requestSettlementDebtEdit() {
+    requestCustomerDebtEdit(selectedSettlementCustomerId);
+}
+
+function requestLedgerDebtEdit() {
+    requestCustomerDebtEdit(activeLedgerCustomerLocalId);
 }
 
 function getSelectedCustomerPayments(customer) {
@@ -3507,10 +3518,13 @@ function editInvoice(invoiceId) {
     });
 }
 
+let activeLedgerCustomerLocalId = null;
+
 function openLedger(name, custId) {
     const customer = db.customers.find(item => item.id == custId) ||
         db.customers.find(item => normalizeCustomerNameKey(item.name) === normalizeCustomerNameKey(name)) ||
         { name, localId: '' };
+    activeLedgerCustomerLocalId = customer.localId || null;
     document.getElementById('ledger-name').innerText = customer.name;
     let custInvoices = db.invoices.filter(invoice =>
         invoiceBelongsToCustomer(invoice, customer) && !invoice.isHiddenFromLedger
