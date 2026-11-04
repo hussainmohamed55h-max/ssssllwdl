@@ -1,5 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '5.9.0';
+const APP_VERSION = '6.0.0';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
@@ -854,7 +854,6 @@ async function mergeDownloadedCatalog(remoteProducts, remoteDeletedProducts, rem
         const downloaded = normalizeDownloadedInvoice(remote);
         const local = invoicesByLocalId.get(downloaded.localId);
         if (!local) {
-            if (db.invoices.some(invoice => invoice.id === downloaded.id && invoice.localId !== downloaded.localId)) return;
             db.invoices.push(downloaded);
             invoicesByLocalId.set(downloaded.localId, downloaded);
         } else {
@@ -1028,7 +1027,7 @@ function saveLocal() {
 }
 
 let activeCategoryFilter = 'الكل'; // متغير لتتبع الفئة المحددة
-let editingInvoiceId = null; // متغير لتتبع الفاتورة قيد التعديل
+let editingInvoiceId = null; // رقم محلي فريد أو رقم قديم لتتبع الفاتورة قيد التعديل
 
 // ==========================================
 // 1. المظهر
@@ -1051,6 +1050,9 @@ function switchTab(tabId, navElement) {
     if (tabId === 'tab-customers') renderCustomers();
     if (tabId === 'tab-settlements') renderSettlementsTab();
     if (tabId === 'tab-settings') checkForAppUpdate(true);
+    if (navigator.onLine && (tabId === 'tab-customers' || tabId === 'tab-settlements')) {
+        refreshSharedDataFromServer(true);
+    }
     requestAnimationFrame(() => updateTabScrollRail(tabId));
 }
 
@@ -3133,7 +3135,7 @@ async function saveOrderAndShowDetails() {
     let order;
     let queueAction = 'create';
     if (editingInvoiceId) {
-        let existingIndex = db.invoices.findIndex(i => i.id === editingInvoiceId);
+        let existingIndex = db.invoices.findIndex(invoice => invoiceMatchesReference(invoice, editingInvoiceId));
         if (existingIndex !== -1) {
             queueAction = 'update';
             order = db.invoices[existingIndex];
@@ -3162,6 +3164,7 @@ async function saveOrderAndShowDetails() {
 
     try {
         await saveAppDataAndQueueOperation('invoice', order.id, queueAction, order);
+        if (navigator.onLine) await syncPendingChangesToConvex();
     } catch (error) {
         db.invoices = previousInvoices;
         db.cart = previousCart;
@@ -3205,10 +3208,12 @@ function showOrderDetails(order) {
 
 async function deleteOrderFromDetails(order) {
     let previousInvoices = JSON.parse(JSON.stringify(db.invoices));
-    db.invoices = db.invoices.filter(i => i.id != order.id);
+    const orderReference = order.localId || order.id;
+    db.invoices = db.invoices.filter(invoice => !invoiceMatchesReference(invoice, orderReference));
 
     try {
         await saveAppDataAndQueueOperation('invoice', order.id, 'delete', order);
+        if (navigator.onLine) await syncPendingChangesToConvex();
         closeModal('orderDetailsModal');
         customAlert(navigator.onLine
             ? 'تم حذف الطلب نهائياً!'
@@ -3486,8 +3491,14 @@ function shareWhatsApp(order) {
     window.open(url, '_blank');
 }
 
-function deleteInvoice(invoiceId) {
-    let inv = db.invoices.find(i => i.id == invoiceId);
+function invoiceMatchesReference(invoice, reference) {
+    const normalizedReference = String(reference ?? '');
+    if (invoice && invoice.localId && String(invoice.localId) === normalizedReference) return true;
+    return invoice && String(invoice.id) === normalizedReference;
+}
+
+function deleteInvoice(invoiceReference) {
+    let inv = db.invoices.find(invoice => invoiceMatchesReference(invoice, invoiceReference));
     if (!inv) return;
     
     customPrompt("هل تريد حذف هذه الفاتورة من القائمة فقط؟ سيبقى مبلغها محسوباً ضمن دين الزبون. (نعم/لا)", "لا", async function(val) {
@@ -3496,6 +3507,7 @@ function deleteInvoice(invoiceId) {
             inv.isHiddenFromLedger = true;
             try {
                 await saveAppDataAndQueueOperation('invoice', inv.id, 'update', inv);
+                if (navigator.onLine) await syncPendingChangesToConvex();
             } catch (error) {
                 db.invoices = previousInvoices;
                 customAlert('تعذر حفظ حذف الفاتورة من القائمة. لم يتغير الدين.');
@@ -3513,14 +3525,14 @@ function deleteInvoice(invoiceId) {
     });
 }
 
-function editInvoice(invoiceId) {
-    let inv = db.invoices.find(i => i.id == invoiceId);
+function editInvoice(invoiceReference) {
+    let inv = db.invoices.find(invoice => invoiceMatchesReference(invoice, invoiceReference));
     if (!inv) return;
     
     customPrompt("تعديل هذه الفاتورة سيقوم بمسح السلة الحالية. هل أنت متأكد؟ (نعم/لا)", "نعم", function(val) {
         if(val === 'نعم') {
             db.cart = JSON.parse(JSON.stringify(inv.items));
-            editingInvoiceId = inv.id;
+            editingInvoiceId = inv.localId || inv.id;
             
             document.getElementById('cart-customer-input').value = inv.customer;
             clearCustomerNameWarning();
@@ -3564,14 +3576,15 @@ function openLedger(name, custId) {
     if(custInvoices.length === 0) { invHtml = `<div class="invoice-row" style="justify-content:center; color:var(--text-muted);">لا توجد معاملات سابقة</div>`; } 
     else {
         custInvoices.forEach(inv => {
+            const invoiceReference = encodeURIComponent(String(inv.localId || inv.id));
             invHtml += `
             <div class="invoice-row">
                 <div><strong>فاتورة #${inv.id}</strong><br><span style="font-size: 12px; color: var(--text-muted);">${inv.date} ${inv.time} - ${inv.status}</span></div>
                 <div style="display: flex; gap: 10px;">
-                    <button class="btn-3d btn-blue" style="padding: 8px;" onclick="editInvoice(${inv.id})"><i class="fas fa-pen"></i></button>
+                    <button class="btn-3d btn-blue" style="padding: 8px;" onclick="editInvoice(decodeURIComponent('${invoiceReference}'))"><i class="fas fa-pen"></i></button>
                     <button class="btn-3d btn-blue" style="padding: 8px;" onclick="exportToPDF(${JSON.stringify(inv).replace(/"/g, '&quot;')})"><i class="fas fa-file-pdf"></i></button>
                     <button class="btn-3d" style="padding: 8px; background:#25D366;" onclick="shareWhatsApp(${JSON.stringify(inv).replace(/"/g, '&quot;')})"><i class="fab fa-whatsapp"></i></button>
-                    <button class="btn-3d" style="padding: 8px; background:#e60000; color:white;" onclick="deleteInvoice(${inv.id})"><i class="fas fa-trash"></i></button>
+                    <button class="btn-3d" style="padding: 8px; background:#e60000; color:white;" onclick="deleteInvoice(decodeURIComponent('${invoiceReference}'))"><i class="fas fa-trash"></i></button>
                 </div>
             </div>`;
         });
@@ -3734,6 +3747,13 @@ async function refreshSharedDataFromServer(force = false) {
             renderCustomers();
             renderSettlementsTab();
             updateCartCustomerSelect();
+            const ledgerModal = document.getElementById('customerLedgerModal');
+            if (ledgerModal && ledgerModal.style.display === 'flex' && activeLedgerCustomerLocalId) {
+                const ledgerCustomer = db.customers.find(customer =>
+                    String(customer.localId) === String(activeLedgerCustomerLocalId)
+                );
+                if (ledgerCustomer) openLedger(ledgerCustomer.name, ledgerCustomer.id);
+            }
         }
     } finally {
         sharedDataRefreshInProgress = false;
