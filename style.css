@@ -171,6 +171,9 @@ body.admin-product-reordering { user-select:none; overscroll-behavior:none; }
 .settlement-debt-card { min-height:108px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:7px; padding:14px; border-radius:18px; background:var(--card-bg); border:2px solid #ff4d4d; box-shadow:0 6px 0 rgba(180,0,0,.22); text-align:center; }
 .settlement-debt-card span { color:var(--text-muted); font-weight:700; }
 .settlement-debt-card strong { color:#ff4d4d; font-size:clamp(23px,6vw,34px); line-height:1.15; direction:ltr; }
+.settlement-debt-heading { display:flex; align-items:center; justify-content:center; gap:8px; }
+.settlement-debt-edit { width:34px; height:34px; display:grid; place-items:center; padding:0; border:0; border-radius:10px; background:#087fce; color:#fff; box-shadow:0 4px 0 #045184; cursor:pointer; }
+.settlement-debt-edit:active { transform:translateY(3px); box-shadow:0 1px 0 #045184; }
 .settlement-pay-button { min-height:108px; font-size:18px; }
 .settlement-pay-button:disabled { opacity:.45; cursor:not-allowed; box-shadow:none; }
 .settlement-history-title { display:flex; justify-content:space-between; align-items:center; gap:8px; margin:18px 0 10px; }

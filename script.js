@@ -1,5 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '5.6.0';
+const APP_VERSION = '5.7.0';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
@@ -194,6 +194,7 @@ function matchesCustomerSearch(customerName, rawQuery) {
 
 function normalizeCustomerForStorage(customer) {
     const name = String(customer && customer.name || '').trim().replace(/\s+/g, ' ');
+    const rawDebtAdjustment = Math.round(Number(customer && customer.debtAdjustment || 0));
     return {
         localId: String(customer && customer.localId || createLocalId('customer')),
         id: Number(customer && customer.id || Date.now()),
@@ -201,6 +202,7 @@ function normalizeCustomerForStorage(customer) {
         nameKey: normalizeCustomerNameKey(name),
         phone: String(customer && customer.phone || ''),
         address: String(customer && customer.address || ''),
+        debtAdjustment: Number.isSafeInteger(rawDebtAdjustment) ? rawDebtAdjustment : 0,
         updatedAt: Number(customer && customer.updatedAt || customer && customer.id || 0),
         ...(customer && customer.isDeleted ? { isDeleted: true } : {})
     };
@@ -492,6 +494,7 @@ function normalizeCustomerForConvex(customer, isDeleted = false) {
         nameKey: normalized.nameKey,
         phone: normalized.phone,
         address: normalized.address,
+        debtAdjustment: normalized.debtAdjustment,
         updatedAt: Number(normalized.updatedAt || Date.now()),
         ...(isDeleted || normalized.isDeleted ? { isDeleted: true } : {})
     };
@@ -667,6 +670,7 @@ function normalizeDownloadedCustomer(customer) {
         nameKey: customer.nameKey,
         phone: customer.phone,
         address: customer.address,
+        debtAdjustment: customer.debtAdjustment,
         updatedAt: customer.updatedAt || customer._creationTime,
         isDeleted: customer.isDeleted
     });
@@ -2237,8 +2241,12 @@ function getCustomerPaymentTotal(customer, excludedPaymentId = null) {
         .reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
 }
 
+function getCustomerAdjustedDebtBase(customer) {
+    return Math.max(0, getCustomerGrossDebt(customer) + Number(customer && customer.debtAdjustment || 0));
+}
+
 function getCustomerOutstandingDebt(customer) {
-    return Math.max(0, getCustomerGrossDebt(customer) - getCustomerPaymentTotal(customer));
+    return Math.max(0, getCustomerAdjustedDebtBase(customer) - getCustomerPaymentTotal(customer));
 }
 
 function linkInvoicesToCustomer(customer, previousCustomerName) {
@@ -2464,7 +2472,7 @@ function renderSettlementCustomers() {
     if (!results) return;
     const query = normalizeCustomerSearchText(search ? search.value : '');
     const matches = [...db.customers]
-        .filter(customer => matchesCustomerSearch(customer.name, query))
+        .filter(customer => !query || normalizeCustomerSearchText(customer.name).includes(query))
         .sort((first, second) => String(first.name).localeCompare(String(second.name), 'ar'));
     if (!matches.length) {
         results.innerHTML = '<span style="color:var(--text-muted); padding:8px;">لا يوجد زبون مطابق.</span>';
@@ -2481,6 +2489,48 @@ function selectSettlementCustomer(customerLocalId) {
     selectedSettlementCustomerId = String(customerLocalId);
     renderSettlementCustomers();
     renderSettlementWorkspace();
+}
+
+function requestSettlementDebtEdit() {
+    const customer = findSettlementCustomer();
+    if (!customer) {
+        customAlert('اختر زبوناً أولاً.');
+        return;
+    }
+    customPrompt('أدخل رمز المنتجات للسماح بتعديل الدين الكلي:', '', enteredCode => {
+        if (String(enteredCode || '').trim() !== getProductsAdminCode()) {
+            customAlert('رمز المنتجات غير صحيح. لم يتم تعديل المبلغ.');
+            return;
+        }
+        const currentDebt = getCustomerOutstandingDebt(customer);
+        customPrompt('أدخل مبلغ الدين الكلي الجديد بالدينار العراقي:', currentDebt.toLocaleString('en-US'), async enteredAmount => {
+            const amount = normalizeIraqiAmount(enteredAmount);
+            if (!Number.isSafeInteger(amount) || amount < 0) {
+                customAlert('أدخل مبلغاً صحيحاً يساوي صفراً أو أكبر بالدينار العراقي.');
+                return;
+            }
+            const previousCustomer = { ...customer };
+            const debtAdjustment = amount + getCustomerPaymentTotal(customer) - getCustomerGrossDebt(customer);
+            Object.assign(customer, normalizeCustomerForStorage({
+                ...customer,
+                debtAdjustment,
+                updatedAt: Date.now()
+            }));
+            try {
+                await saveAppDataAndQueueOperation('customer', customer.id, 'update', customer);
+                syncChangesIfOnline();
+            } catch (error) {
+                Object.assign(customer, previousCustomer);
+                customAlert('تعذر حفظ مبلغ الدين الجديد. بقي المبلغ السابق كما هو.');
+                return;
+            }
+            renderSettlementWorkspace();
+            renderCustomers();
+            customAlert(navigator.onLine
+                ? 'تم تعديل الدين الكلي وحفظه بنجاح.'
+                : 'تم تعديل الدين الكلي محلياً، وستتم مزامنته عند توفر الإنترنت.');
+        }, { inputMode: 'numeric' });
+    }, { type: 'password', inputMode: 'numeric', maxLength: 6 });
 }
 
 function getSelectedCustomerPayments(customer) {
@@ -2515,7 +2565,10 @@ function renderSettlementWorkspace() {
     workspace.innerHTML = `
         <h2 class="settlement-customer-title"><i class="fas fa-user-check"></i> ${escapeInvoiceHtml(customer.name)}</h2>
         <div class="settlement-debt-row">
-            <div class="settlement-debt-card"><span>الدين الكلي المتبقي</span><strong>${debt.toLocaleString()} د.ع</strong></div>
+            <div class="settlement-debt-card">
+                <div class="settlement-debt-heading"><span>الدين الكلي المتبقي</span><button class="settlement-debt-edit" type="button" onclick="requestSettlementDebtEdit()" aria-label="تعديل الدين الكلي"><i class="fas fa-pen"></i></button></div>
+                <strong>${debt.toLocaleString()} د.ع</strong>
+            </div>
             <button class="btn-3d settlement-pay-button" type="button" onclick="openSettlementPaymentModal()" ${debt <= 0 ? 'disabled' : ''}><i class="fas fa-hand-holding-dollar"></i><br>تسديد</button>
         </div>
         <div class="settlement-history-title">
@@ -2543,7 +2596,7 @@ function openSettlementPaymentModal(paymentId = null) {
         return;
     }
     const payment = paymentId === null ? null : db.payments.find(item => item.id == paymentId);
-    const maximum = Math.max(0, getCustomerGrossDebt(customer) - getCustomerPaymentTotal(customer, payment && payment.id));
+    const maximum = Math.max(0, getCustomerAdjustedDebtBase(customer) - getCustomerPaymentTotal(customer, payment && payment.id));
     document.getElementById('settlementPaymentModalTitle').textContent = payment ? 'تعديل التسديد' : 'تسديد دين';
     document.getElementById('editSettlementPaymentId').value = payment ? String(payment.id) : '';
     document.getElementById('settlementModalCustomer').textContent = customer.name;
@@ -2559,7 +2612,7 @@ async function saveSettlementPayment() {
     const editId = document.getElementById('editSettlementPaymentId').value;
     const existing = editId ? db.payments.find(payment => payment.id == editId) : null;
     const amount = normalizeIraqiAmount(document.getElementById('settlementAmount').value);
-    const maximum = Math.max(0, getCustomerGrossDebt(customer) - getCustomerPaymentTotal(customer, existing && existing.id));
+    const maximum = Math.max(0, getCustomerAdjustedDebtBase(customer) - getCustomerPaymentTotal(customer, existing && existing.id));
     if (!Number.isSafeInteger(amount) || amount <= 0) {
         customAlert('أدخل مبلغاً صحيحاً أكبر من صفر بالدينار العراقي.');
         return;
@@ -3505,8 +3558,12 @@ document.getElementById('customConfirmYesBtn').addEventListener('click', functio
 });
 document.getElementById('customConfirmCancelBtn').addEventListener('click', closeCustomConfirm);
 let currentPromptCallback = null;
-function customPrompt(message, defaultValue, callback) {
+function customPrompt(message, defaultValue, callback, options = {}) {
     document.getElementById('customPromptMessage').innerText = message; let inputField = document.getElementById('customPromptInput');
+    inputField.type = options.type || 'text';
+    inputField.inputMode = options.inputMode || 'text';
+    if (Number.isInteger(options.maxLength) && options.maxLength > 0) inputField.maxLength = options.maxLength;
+    else inputField.removeAttribute('maxlength');
     inputField.value = defaultValue || ''; currentPromptCallback = callback; openModal('customPromptModal'); setTimeout(() => inputField.focus(), 100);
 }
 document.getElementById('promptConfirmBtn').addEventListener('click', function() {

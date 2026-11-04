@@ -66,6 +66,7 @@ export const customerFields = {
   nameKey: v.string(),
   phone: v.string(),
   address: v.string(),
+  debtAdjustment: v.optional(v.number()),
   updatedAt: v.number(),
   isDeleted: v.optional(v.boolean()),
 };
