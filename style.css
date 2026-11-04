@@ -25,11 +25,14 @@ body { background-color: var(--bg-dark); color: var(--text-light); padding-botto
 
 .tab-content { display: none; padding: 20px; animation: fadeIn 0.3s; }
 .tab-content.active { display: block; }
-#tab-products.active { height:calc(100dvh - 105px); overflow-y:auto; overflow-x:hidden; padding-bottom:115px; direction:ltr; scroll-behavior:smooth; overscroll-behavior:contain; scrollbar-width:auto; scrollbar-color:var(--primary-green) var(--input-bg); }
-#tab-products > * { direction:rtl; }
-#tab-products::-webkit-scrollbar { width:12px; }
-#tab-products::-webkit-scrollbar-track { background:var(--input-bg); border-radius:12px; }
-#tab-products::-webkit-scrollbar-thumb { background:var(--primary-green); border:3px solid var(--input-bg); border-radius:12px; }
+#tab-pos.active, #tab-products.active { height:calc(100dvh - 105px); overflow-y:auto; overflow-x:hidden; padding-bottom:115px; direction:ltr; scroll-behavior:smooth; overscroll-behavior:contain; scrollbar-width:none; }
+#tab-pos > :not(.tab-scroll-rail), #tab-products > :not(.tab-scroll-rail) { direction:rtl; }
+#tab-pos::-webkit-scrollbar, #tab-products::-webkit-scrollbar { width:0; height:0; }
+.tab-scroll-rail { display:none; position:fixed; top:18px; right:3px; bottom:104px; width:18px; z-index:900; border:1px solid color-mix(in srgb,var(--primary-green) 58%,var(--border-color)); border-radius:14px; background:color-mix(in srgb,var(--input-bg) 88%,transparent); box-shadow:0 3px 12px rgba(0,0,0,.2); touch-action:none; direction:ltr !important; }
+.tab-content.active > .tab-scroll-rail:not(.tab-scroll-rail-hidden) { display:block; }
+.tab-scroll-thumb { position:absolute; top:0; left:2px; width:12px; min-height:58px; border-radius:12px; background:linear-gradient(180deg,#43df86,var(--primary-green)); border:1px solid rgba(0,0,0,.16); box-shadow:0 3px 7px rgba(0,0,0,.28); touch-action:none; cursor:grab; }
+.tab-scroll-thumb::after { content:'↕'; position:absolute; inset:0; display:grid; place-items:center; color:#073b20; font-size:14px; font-weight:900; }
+.tab-scroll-thumb:active { cursor:grabbing; filter:brightness(.92); }
 .products-admin-actions { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-bottom:20px; }
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 

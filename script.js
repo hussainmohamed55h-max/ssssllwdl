@@ -1,5 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '5.4.0';
+const APP_VERSION = '5.5.0';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
@@ -156,6 +156,40 @@ function normalizeCustomerSearchText(name) {
         .trim()
         .replace(/\s+/g, ' ')
         .toLocaleLowerCase('ar');
+}
+
+function isWithinOneSearchEdit(first, second) {
+    if (Math.abs(first.length - second.length) > 1) return false;
+    let firstIndex = 0;
+    let secondIndex = 0;
+    let edits = 0;
+    while (firstIndex < first.length && secondIndex < second.length) {
+        if (first[firstIndex] === second[secondIndex]) {
+            firstIndex += 1;
+            secondIndex += 1;
+            continue;
+        }
+        edits += 1;
+        if (edits > 1) return false;
+        if (first.length > second.length) firstIndex += 1;
+        else if (second.length > first.length) secondIndex += 1;
+        else {
+            firstIndex += 1;
+            secondIndex += 1;
+        }
+    }
+    if (firstIndex < first.length || secondIndex < second.length) edits += 1;
+    return edits <= 1;
+}
+
+function matchesCustomerSearch(customerName, rawQuery) {
+    const name = normalizeCustomerSearchText(customerName);
+    const query = normalizeCustomerSearchText(rawQuery);
+    if (!query || name.startsWith(query)) return true;
+    if (query.length < 3 || !name || name[0] !== query[0]) return false;
+    return [query.length - 1, query.length, query.length + 1]
+        .filter(length => length > 0 && length <= name.length)
+        .some(length => isWithinOneSearchEdit(name.slice(0, length), query));
 }
 
 function normalizeCustomerForStorage(customer) {
@@ -1013,7 +1047,78 @@ function switchTab(tabId, navElement) {
     if (tabId === 'tab-customers') renderCustomers();
     if (tabId === 'tab-settlements') renderSettlementsTab();
     if (tabId === 'tab-settings') checkForAppUpdate(true);
+    requestAnimationFrame(() => updateTabScrollRail(tabId));
 }
+
+function updateTabScrollRail(tabOrId) {
+    const tab = typeof tabOrId === 'string' ? document.getElementById(tabOrId) : tabOrId;
+    if (!tab) return;
+    const rail = tab.querySelector('.tab-scroll-rail');
+    const thumb = rail?.querySelector('.tab-scroll-thumb');
+    if (!rail || !thumb) return;
+    const maximumScroll = Math.max(0, tab.scrollHeight - tab.clientHeight);
+    rail.classList.toggle('tab-scroll-rail-hidden', maximumScroll <= 1);
+    if (maximumScroll <= 1) return;
+    const railHeight = rail.clientHeight;
+    const thumbHeight = Math.max(58, Math.round(railHeight * (tab.clientHeight / tab.scrollHeight)));
+    const maximumThumbTop = Math.max(0, railHeight - thumbHeight);
+    const thumbTop = maximumThumbTop * (tab.scrollTop / maximumScroll);
+    thumb.style.height = `${thumbHeight}px`;
+    thumb.style.transform = `translateY(${thumbTop}px)`;
+}
+
+function initializeTabScrollRails() {
+    document.querySelectorAll('.tab-scroll-rail').forEach(rail => {
+        const tab = document.getElementById(rail.dataset.scrollTarget);
+        const thumb = rail.querySelector('.tab-scroll-thumb');
+        if (!tab || !thumb) return;
+        let dragState = null;
+
+        tab.addEventListener('scroll', () => updateTabScrollRail(tab), { passive: true });
+        rail.addEventListener('pointerdown', event => {
+            if (event.target === thumb) return;
+            event.preventDefault();
+            const railRect = rail.getBoundingClientRect();
+            const thumbHeight = thumb.getBoundingClientRect().height;
+            const maximumThumbTop = Math.max(1, railRect.height - thumbHeight);
+            const requestedTop = Math.min(maximumThumbTop, Math.max(0, event.clientY - railRect.top - thumbHeight / 2));
+            const maximumScroll = Math.max(0, tab.scrollHeight - tab.clientHeight);
+            tab.scrollTo({ top: maximumScroll * (requestedTop / maximumThumbTop), behavior: 'smooth' });
+        });
+        thumb.addEventListener('pointerdown', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            thumb.setPointerCapture(event.pointerId);
+            dragState = { pointerId: event.pointerId, startY: event.clientY, startScrollTop: tab.scrollTop };
+        });
+        thumb.addEventListener('pointermove', event => {
+            if (!dragState || dragState.pointerId !== event.pointerId) return;
+            event.preventDefault();
+            const railHeight = rail.clientHeight;
+            const thumbHeight = thumb.getBoundingClientRect().height;
+            const maximumThumbTop = Math.max(1, railHeight - thumbHeight);
+            const maximumScroll = Math.max(0, tab.scrollHeight - tab.clientHeight);
+            tab.scrollTop = Math.min(maximumScroll, Math.max(0,
+                dragState.startScrollTop + ((event.clientY - dragState.startY) / maximumThumbTop) * maximumScroll
+            ));
+        });
+        const finishDrag = event => {
+            if (!dragState || dragState.pointerId !== event.pointerId) return;
+            dragState = null;
+            if (thumb.hasPointerCapture(event.pointerId)) thumb.releasePointerCapture(event.pointerId);
+        };
+        thumb.addEventListener('pointerup', finishDrag);
+        thumb.addEventListener('pointercancel', finishDrag);
+    });
+    window.addEventListener('resize', () => {
+        document.querySelectorAll('.tab-content.active').forEach(updateTabScrollRail);
+    });
+    requestAnimationFrame(() => {
+        document.querySelectorAll('.tab-content.active').forEach(updateTabScrollRail);
+    });
+}
+
+initializeTabScrollRails();
 function triggerFlip(btn, callback) {
     btn.classList.add('flip-animate');
     setTimeout(() => { btn.classList.remove('flip-animate'); if(callback) callback(); }, 400);
@@ -2062,6 +2167,10 @@ function renderProducts() {
 
     posGrid.innerHTML = posGridHtml;
     adminGrid.innerHTML = adminGridHtml;
+    requestAnimationFrame(() => {
+        updateTabScrollRail('tab-pos');
+        updateTabScrollRail('tab-products');
+    });
 }
 
 function getProductCartActionsHtml(product) {
@@ -2293,7 +2402,7 @@ function renderCustomers() {
     });
 
     const orderedCustomers = [...db.customers].filter(customer =>
-        !query || normalizeCustomerSearchText(customer.name).startsWith(query)
+        matchesCustomerSearch(customer.name, query)
     ).sort((first, second) => {
         const firstSaleOrder = Math.max(
             latestInvoiceByCustomer.get(`id:${first.localId}`) ?? -1,
@@ -2356,7 +2465,7 @@ function renderSettlementCustomers() {
     if (!results) return;
     const query = normalizeCustomerSearchText(search ? search.value : '');
     const matches = [...db.customers]
-        .filter(customer => !query || normalizeCustomerSearchText(customer.name).startsWith(query))
+        .filter(customer => matchesCustomerSearch(customer.name, query))
         .sort((first, second) => String(first.name).localeCompare(String(second.name), 'ar'));
     if (!matches.length) {
         results.innerHTML = '<span style="color:var(--text-muted); padding:8px;">لا يوجد زبون مطابق.</span>';
@@ -2679,7 +2788,7 @@ function handleCartCustomerSearch() {
     clearCustomerNameWarning();
     const query = normalizeCustomerSearchText(input.value);
     const matches = [...db.customers]
-        .filter(customer => !query || normalizeCustomerSearchText(customer.name).startsWith(query))
+        .filter(customer => matchesCustomerSearch(customer.name, query))
         .sort((first, second) => String(first.name).localeCompare(String(second.name), 'ar'))
         .slice(0, 12);
     suggestions.innerHTML = matches.length
