@@ -1,5 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '6.1.0';
+const APP_VERSION = '6.2.0';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
@@ -2372,29 +2372,35 @@ function updateCustomerSaveState() {
 
 function deleteCustomer(id, event) {
     event.stopPropagation();
-    customPrompt("هل أنت متأكد من حذف هذا الزبون؟ اكتب 'نعم' للتأكيد", "", async function(val) {
-        if(val === 'نعم') {
-            const customer = db.customers.find(c => c.id == id);
-            if (!customer) return;
-            const previousCustomers = JSON.parse(JSON.stringify(db.customers));
-            db.customers = db.customers.filter(c => c.id != id);
-            const deletedCustomer = normalizeCustomerForStorage({
-                ...customer,
-                updatedAt: Date.now(),
-                isDeleted: true
-            });
-            try {
-                await saveAppDataAndQueueOperation('customer', customer.id, 'delete', deletedCustomer);
-                syncChangesIfOnline();
-            } catch (error) {
-                db.customers = previousCustomers;
-                customAlert('تعذر حفظ حذف الزبون محلياً. لم يتم حذف الزبون.');
-                return;
-            }
-            renderCustomers(); renderSettlementsTab(); updateCartCustomerSelect();
-            customAlert('تم حذف الزبون بنجاح!');
+    const customer = db.customers.find(c => c.id == id);
+    if (!customer) return;
+    customPrompt('أدخل رمز المنتجات لحذف هذا الزبون:', '', function(code) {
+        if (String(code || '').trim() !== getProductsAdminCode()) {
+            customAlert('رمز المنتجات غير صحيح. لم يتم حذف الزبون.');
+            return;
         }
-    });
+        customPrompt("هل أنت متأكد من حذف هذا الزبون؟ اكتب 'نعم' للتأكيد", "", async function(val) {
+            if(val === 'نعم') {
+                const previousCustomers = JSON.parse(JSON.stringify(db.customers));
+                db.customers = db.customers.filter(c => c.id != id);
+                const deletedCustomer = normalizeCustomerForStorage({
+                    ...customer,
+                    updatedAt: Date.now(),
+                    isDeleted: true
+                });
+                try {
+                    await saveAppDataAndQueueOperation('customer', customer.id, 'delete', deletedCustomer);
+                    syncChangesIfOnline();
+                } catch (error) {
+                    db.customers = previousCustomers;
+                    customAlert('تعذر حفظ حذف الزبون محلياً. لم يتم حذف الزبون.');
+                    return;
+                }
+                renderCustomers(); renderSettlementsTab(); updateCartCustomerSelect();
+                customAlert('تم حذف الزبون بنجاح!');
+            }
+        });
+    }, { type: 'password', inputMode: 'numeric', maxLength: 6 });
 }
 
 async function saveCustomer() {
@@ -3256,6 +3262,7 @@ function showOrderDetails(order) {
     document.getElementById('od-datetime').innerText = order.date + " | " + order.time;
     document.getElementById('od-total').innerText = order.total.toLocaleString() + " د.ع";
     document.getElementById('od-grand-total').innerText = order.total.toLocaleString() + " د.ع";
+    document.getElementById('od-total-quantity').innerText = formatInvoiceQuantity(getInvoiceTotalQuantity(order));
 
     let itemsHtml = "";
     order.items.forEach(item => {
@@ -3302,6 +3309,17 @@ function escapeInvoiceHtml(value) {
         .replace(/'/g, '&#039;');
 }
 
+function getInvoiceTotalQuantity(order) {
+    return (Array.isArray(order && order.items) ? order.items : []).reduce((sum, item) => {
+        const quantity = Number(item && item.qty);
+        return Number.isFinite(quantity) ? sum + quantity : sum;
+    }, 0);
+}
+
+function formatInvoiceQuantity(quantity) {
+    return Number(quantity || 0).toLocaleString('en-US', { maximumFractionDigits: 2 });
+}
+
 function buildInvoiceRowsHtml(order) {
     return (Array.isArray(order.items) ? order.items : []).map((item, index) => {
         const name = escapeInvoiceHtml(item.name);
@@ -3327,7 +3345,10 @@ function buildInvoiceSheetHtml(order) {
             <div class="invoice-meta"><div><strong>رقم الفاتورة:</strong> ${escapeInvoiceHtml(order.id)}</div><div><strong>التاريخ:</strong> ${escapeInvoiceHtml(order.date)} - ${escapeInvoiceHtml(order.time)}</div></div>
             <div class="invoice-customer"><strong>العميل:</strong> ${escapeInvoiceHtml(order.customer)}</div>
             <table><thead><tr><th>ت</th><th>الصنف</th><th>الكمية</th><th>السعر</th><th>الإجمالي</th></tr></thead><tbody>${buildInvoiceRowsHtml(order)}</tbody></table>
-            <h3 class="invoice-total">الإجمالي الكلي: ${Number(order.total || 0).toLocaleString()} د.ع</h3>
+            <div class="invoice-summary">
+                <h3 class="invoice-quantity-total">إجمالي الكميات: ${formatInvoiceQuantity(getInvoiceTotalQuantity(order))}</h3>
+                <h3 class="invoice-total">الإجمالي الكلي: ${Number(order.total || 0).toLocaleString()} د.ع</h3>
+            </div>
             <p class="invoice-status">حالة الدفع: ${escapeInvoiceHtml(order.status)}</p>
         </main>`;
 }
@@ -3359,7 +3380,11 @@ function buildInvoicePreviewHtml(order) {
             th{background:#f2f2f2; border:1px solid #ddd; padding:10px;}
             td{border:1px solid #ddd; padding:8px; overflow-wrap:anywhere;}
             .invoice-item-note{font-size:11px; color:#555;}
-            .invoice-total,.invoice-status{text-align:left; margin-top:20px;}
+            .invoice-summary{display:flex; justify-content:space-between; align-items:center; gap:16px; margin-top:20px;}
+            .invoice-summary h3{margin:0;}
+            .invoice-quantity-total{text-align:right;}
+            .invoice-total{text-align:left;}
+            .invoice-status{text-align:left;}
             .invoice-status{margin-top:0;}
             @media(max-width:520px){body{padding:4px;}.preview-actions{padding:6px; gap:6px;}.preview-actions button{font-size:14px; padding:11px 6px;}.invoice-sheet{padding:12px 8px;}.header-info h1{font-size:20px;}.invoice-meta{font-size:12px;}.invoice-sheet table{font-size:12px;}th,td{padding:6px 3px;}}
             @media print{body{padding:0; background:#fff;}.preview-actions{display:none;}.invoice-sheet{max-width:none; padding:0;}}
@@ -3550,7 +3575,7 @@ function exportToPDF(order) {
 function shareWhatsApp(order) {
     let text = `*فاتورة مبيعات*\nرقم: ${order.id}\nالعميل: ${order.customer}\nالتاريخ: ${order.date} ${order.time}\n\n*المشتريات:*\n`;
     order.items.forEach((item, i) => { text += `${i+1}. ${item.name}${isInvoiceItemHalfCarton(item) ? ' (نصف كارتون)' : ''}${item.note ? ` (${item.note})` : ''} - العدد: ${item.qty} - السعر: ${(item.price * item.qty).toLocaleString()} د.ع\n`; });
-    text += `\n*الإجمالي الكلي: ${order.total.toLocaleString()} د.ع*\nحالة الدفع: ${order.status}`;
+    text += `\n*إجمالي الكميات: ${formatInvoiceQuantity(getInvoiceTotalQuantity(order))}*\n*الإجمالي الكلي: ${order.total.toLocaleString()} د.ع*\nحالة الدفع: ${order.status}`;
     let url = `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;
     if(order.phone) url = `https://api.whatsapp.com/send?phone=${order.phone.replace(/^0/, '+964')}&text=${encodeURIComponent(text)}`;
     window.open(url, '_blank');
