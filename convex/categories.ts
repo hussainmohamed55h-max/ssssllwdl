@@ -26,6 +26,7 @@ export const updateCategory = mutation({
     const existing = await ctx.db.query("categories")
       .withIndex("by_localId", q => q.eq("localId", args.localId)).unique();
     if (!existing) throw new Error("Category not found");
+    if (existing.isDeleted === true) return existing._id;
     await ctx.db.replace(existing._id, {
       ...args,
       updatedAt: args.updatedAt ?? Date.now(),
@@ -40,7 +41,10 @@ export const deleteCategory = mutation({
     const existing = await ctx.db.query("categories")
       .withIndex("by_localId", q => q.eq("localId", args.localId)).unique();
     if (!existing) return false;
-    await ctx.db.delete(existing._id);
+    await ctx.db.patch(existing._id, {
+      isDeleted: true,
+      updatedAt: Math.max(Date.now(), Number(existing.updatedAt ?? 0) + 1),
+    });
     return true;
   },
 });

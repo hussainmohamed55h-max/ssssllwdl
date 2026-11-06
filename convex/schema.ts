@@ -31,6 +31,7 @@ export const invoiceFields = {
   items: v.array(invoiceItemValidator),
   createdAt: v.optional(v.number()),
   isHiddenFromLedger: v.optional(v.boolean()),
+  isDeleted: v.optional(v.boolean()),
 };
 
 export const productFields = {
@@ -59,6 +60,7 @@ export const categoryFields = {
   id: v.number(),
   name: v.string(),
   updatedAt: v.optional(v.number()),
+  isDeleted: v.optional(v.boolean()),
 };
 
 export const customerFields = {

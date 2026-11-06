@@ -55,6 +55,7 @@ export const updateInvoice = mutation({
     if (!existing) {
       throw new Error("Invoice not found");
     }
+    if (existing.isDeleted === true) return existing._id;
 
     await ctx.db.replace(existing._id, args);
     return existing._id;
@@ -70,7 +71,7 @@ export const deleteInvoice = mutation({
       .unique();
 
     if (!existing) return false;
-    await ctx.db.delete(existing._id);
+    await ctx.db.patch(existing._id, { isDeleted: true });
     return true;
   },
 });
@@ -98,6 +99,10 @@ export const pruneExpiredInvoices = mutation({
     let skippedUnpaid = 0;
 
     for (const invoice of expired) {
+      if (invoice.isDeleted === true) {
+        deletable.push(invoice);
+        continue;
+      }
       const amountToPreserve = invoice.status === "واصل" ? 0 : Math.max(0, Number(invoice.total || 0));
       if (amountToPreserve > 0) {
         const customer = await findInvoiceCustomer(ctx, invoice);

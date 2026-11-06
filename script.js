@@ -1,5 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '6.2.0';
+const APP_VERSION = '6.3.0';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
@@ -614,6 +614,25 @@ function syncChangesIfOnline() {
 }
 
 let catalogDownloadInProgress = false;
+let liveSharedDataClient = null;
+let liveSharedDataUnsubscribers = [];
+let liveSharedDataApplyInProgress = false;
+let liveSharedDataApplyRequested = false;
+let liveSharedDataGeneration = 0;
+let liveSharedDataSnapshots = createEmptyLiveSharedDataSnapshots();
+
+function createEmptyLiveSharedDataSnapshots() {
+    return {
+        ready: new Set(),
+        products: [],
+        deletedProducts: [],
+        categories: [],
+        invoices: [],
+        customers: [],
+        payments: [],
+        productOrder: null
+    };
+}
 
 function normalizeDownloadedProduct(product) {
     return normalizeProductForStorage({
@@ -643,7 +662,8 @@ function normalizeDownloadedCategory(category) {
         localId: String(category.localId),
         id: Number(category.id),
         name: String(category.name || ''),
-        updatedAt: Number(category.updatedAt || category._creationTime || 0)
+        updatedAt: Number(category.updatedAt || category._creationTime || 0),
+        ...(category.isDeleted === true ? { isDeleted: true } : {})
     };
 }
 
@@ -673,6 +693,7 @@ function normalizeDownloadedInvoice(invoice) {
     if (typeof invoice.isHiddenFromLedger === 'boolean') {
         normalizedInvoice.isHiddenFromLedger = invoice.isHiddenFromLedger;
     }
+    if (invoice.isDeleted === true) normalizedInvoice.isDeleted = true;
     return normalizedInvoice;
 }
 
@@ -853,6 +874,13 @@ async function mergeDownloadedCatalog(remoteProducts, remoteDeletedProducts, rem
         if (pendingLocalIds.has(`category:${remote.localId}`)) return;
         const downloaded = normalizeDownloadedCategory(remote);
         const local = categoriesByLocalId.get(downloaded.localId);
+        if (downloaded.isDeleted) {
+            if (local) {
+                db.categories = db.categories.filter(category => category !== local);
+                categoriesByLocalId.delete(downloaded.localId);
+            }
+            return;
+        }
         if (!local) {
             if (db.categories.some(category => category.id === downloaded.id && category.localId !== downloaded.localId)) return;
             db.categories.push(downloaded);
@@ -868,6 +896,13 @@ async function mergeDownloadedCatalog(remoteProducts, remoteDeletedProducts, rem
         if (pendingLocalIds.has(`invoice:${remote.localId}`)) return;
         const downloaded = normalizeDownloadedInvoice(remote);
         const local = invoicesByLocalId.get(downloaded.localId);
+        if (downloaded.isDeleted) {
+            if (local) {
+                db.invoices = db.invoices.filter(invoice => invoice !== local);
+                invoicesByLocalId.delete(downloaded.localId);
+            }
+            return;
+        }
         if (!local) {
             db.invoices.push(downloaded);
             invoicesByLocalId.set(downloaded.localId, downloaded);
@@ -999,6 +1034,117 @@ async function downloadCatalogFromConvex() {
     } finally {
         catalogDownloadInProgress = false;
     }
+}
+
+function renderSharedDataViews() {
+    renderCategories();
+    renderProducts();
+    renderCustomers();
+    renderSettlementsTab();
+    updateCartCustomerSelect();
+    const ledgerModal = document.getElementById('customerLedgerModal');
+    if (ledgerModal && ledgerModal.style.display === 'flex' && activeLedgerCustomerLocalId) {
+        const ledgerCustomer = db.customers.find(customer =>
+            String(customer.localId) === String(activeLedgerCustomerLocalId)
+        );
+        if (ledgerCustomer) openLedger(ledgerCustomer.name, ledgerCustomer.id);
+    }
+}
+
+function liveSharedDataIsReady(snapshots = liveSharedDataSnapshots) {
+    return ['products', 'deletedProducts', 'categories', 'invoices', 'customers', 'payments', 'productOrder']
+        .every(key => snapshots.ready.has(key));
+}
+
+async function applyLiveSharedDataSnapshots(generation = liveSharedDataGeneration) {
+    const snapshots = liveSharedDataSnapshots;
+    if (generation !== liveSharedDataGeneration || !liveSharedDataIsReady(snapshots)) return;
+    if (liveSharedDataApplyInProgress || sharedDataRefreshInProgress) {
+        liveSharedDataApplyRequested = true;
+        return;
+    }
+    liveSharedDataApplyInProgress = true;
+    try {
+        const pendingItems = await getPendingSyncItems();
+        if (generation !== liveSharedDataGeneration || snapshots !== liveSharedDataSnapshots) return;
+        await mergeDownloadedCatalog(
+            snapshots.products,
+            snapshots.deletedProducts,
+            snapshots.categories,
+            snapshots.invoices,
+            snapshots.customers,
+            snapshots.payments,
+            snapshots.productOrder,
+            pendingItems
+        );
+        lastSharedDataRefreshAt = Date.now();
+        renderSharedDataViews();
+    } catch (error) {
+        console.warn('تعذر تطبيق تحديث Convex الفوري، وسيبقى الفحص الدوري فعالاً.', error);
+    } finally {
+        liveSharedDataApplyInProgress = false;
+        if (liveSharedDataApplyRequested && generation === liveSharedDataGeneration) {
+            liveSharedDataApplyRequested = false;
+            applyLiveSharedDataSnapshots(generation);
+        }
+    }
+}
+
+function startLiveSharedDataSync() {
+    if (!navigator.onLine || liveSharedDataClient) return false;
+    if (!globalThis.CONVEX_URL || !globalThis.convex || !convex.ConvexClient) {
+        console.warn('عميل Convex الفوري غير متوفر؛ سيستمر الفحص الدوري.');
+        return false;
+    }
+
+    const generation = ++liveSharedDataGeneration;
+    liveSharedDataSnapshots = createEmptyLiveSharedDataSnapshots();
+    try {
+        liveSharedDataClient = new convex.ConvexClient(globalThis.CONVEX_URL, {
+            unsavedChangesWarning: false
+        });
+        const subscribe = (key, query, args) => {
+            const unsubscribe = liveSharedDataClient.onUpdate(query, args, value => {
+                if (generation !== liveSharedDataGeneration) return;
+                liveSharedDataSnapshots[key] = value;
+                liveSharedDataSnapshots.ready.add(key);
+                applyLiveSharedDataSnapshots(generation);
+            }, error => {
+                console.warn(`تعذر الاشتراك الفوري في ${key}؛ سيستمر الفحص الدوري.`, error);
+                stopLiveSharedDataSync();
+                refreshSharedDataFromServer(true);
+            });
+            liveSharedDataUnsubscribers.push(unsubscribe);
+        };
+
+        subscribe('products', convex.anyApi.products.getProducts, { limit: 5000 });
+        subscribe('deletedProducts', convex.anyApi.products.getDeletedProducts, { limit: 5000 });
+        subscribe('categories', convex.anyApi.categories.getCategories, { limit: 5000 });
+        subscribe('invoices', convex.anyApi.invoices.getInvoices, { limit: 5000 });
+        subscribe('customers', convex.anyApi.customers.getCustomers, { limit: 5000 });
+        subscribe('payments', convex.anyApi.payments.getPayments, { limit: 5000 });
+        subscribe('productOrder', convex.anyApi.productOrder.getProductOrder, { key: 'pos-product-order' });
+        return true;
+    } catch (error) {
+        console.warn('تعذر تشغيل مزامنة Convex الفورية؛ سيستمر الفحص الدوري.', error);
+        stopLiveSharedDataSync();
+        return false;
+    }
+}
+
+function stopLiveSharedDataSync() {
+    liveSharedDataGeneration += 1;
+    liveSharedDataApplyRequested = false;
+    liveSharedDataUnsubscribers.forEach(unsubscribe => {
+        try { unsubscribe(); } catch (error) { console.warn('تعذر إيقاف اشتراك Convex.', error); }
+    });
+    liveSharedDataUnsubscribers = [];
+    if (liveSharedDataClient) {
+        const client = liveSharedDataClient;
+        liveSharedDataClient = null;
+        client.close().catch(error => console.warn('تعذر إغلاق اتصال Convex الفوري.', error));
+    }
+    liveSharedDataSnapshots = createEmptyLiveSharedDataSnapshots();
 }
 
 // قاعدة بيانات تتضمن الفئات الآن
@@ -2317,6 +2463,13 @@ function getCustomerOutstandingDebt(customer) {
     return Math.max(0, getCustomerAdjustedDebtBase(customer) - getCustomerPaymentTotal(customer));
 }
 
+function getDebtAdjustmentForTargetOutstanding(customer, targetAmount) {
+    return Number(targetAmount || 0) +
+        getCustomerPaymentTotal(customer) -
+        getCustomerGrossDebt(customer) -
+        Number(customer && customer.archivedDebt || 0);
+}
+
 function linkInvoicesToCustomer(customer, previousCustomerName) {
     const previousNameKey = normalizeCustomerNameKey(previousCustomerName);
     const relatedInvoices = db.invoices.filter(invoice =>
@@ -2584,7 +2737,7 @@ function requestCustomerDebtEdit(customerLocalId) {
                 return;
             }
             const previousCustomer = { ...customer };
-            const debtAdjustment = amount + getCustomerPaymentTotal(customer) - getCustomerGrossDebt(customer);
+            const debtAdjustment = getDebtAdjustmentForTargetOutstanding(customer, amount);
             Object.assign(customer, normalizeCustomerForStorage({
                 ...customer,
                 debtAdjustment,
@@ -3824,7 +3977,7 @@ const SHARED_DATA_REFRESH_INTERVAL_MS = 60 * 1000;
 let sharedDataRefreshInProgress = false;
 let lastSharedDataRefreshAt = 0;
 async function refreshSharedDataFromServer(force = false) {
-    if (!navigator.onLine || sharedDataRefreshInProgress) return;
+    if (!navigator.onLine || sharedDataRefreshInProgress || liveSharedDataApplyInProgress) return;
     if (!force && lastSharedDataRefreshAt && Date.now() - lastSharedDataRefreshAt < SHARED_DATA_REFRESH_INTERVAL_MS) return;
     sharedDataRefreshInProgress = true;
     try {
@@ -3832,21 +3985,14 @@ async function refreshSharedDataFromServer(force = false) {
         const downloaded = await downloadCatalogFromConvex();
         if (downloaded) {
             lastSharedDataRefreshAt = Date.now();
-            renderCategories();
-            renderProducts();
-            renderCustomers();
-            renderSettlementsTab();
-            updateCartCustomerSelect();
-            const ledgerModal = document.getElementById('customerLedgerModal');
-            if (ledgerModal && ledgerModal.style.display === 'flex' && activeLedgerCustomerLocalId) {
-                const ledgerCustomer = db.customers.find(customer =>
-                    String(customer.localId) === String(activeLedgerCustomerLocalId)
-                );
-                if (ledgerCustomer) openLedger(ledgerCustomer.name, ledgerCustomer.id);
-            }
+            renderSharedDataViews();
         }
     } finally {
         sharedDataRefreshInProgress = false;
+        if (liveSharedDataApplyRequested) {
+            liveSharedDataApplyRequested = false;
+            applyLiveSharedDataSnapshots();
+        }
     }
 }
 
@@ -3854,13 +4000,17 @@ async function refreshSharedDataFromServer(force = false) {
 loadAppDatabase().then(() => {
     document.getElementById('currentAppVersion').textContent = `v${APP_VERSION}`;
     if (navigator.onLine) lastSharedDataRefreshAt = Date.now();
+    startLiveSharedDataSync();
     checkForAppUpdate(true);
 });
 
 window.addEventListener('online', async () => {
     await refreshSharedDataFromServer(true);
+    startLiveSharedDataSync();
     checkForAppUpdate(true);
 });
+
+window.addEventListener('offline', stopLiveSharedDataSync);
 
 document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible' || !navigator.onLine) return;
