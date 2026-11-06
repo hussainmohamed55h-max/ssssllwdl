@@ -27,6 +27,28 @@ async function findInvoiceCustomer(ctx: any, invoice: any) {
   return byName && !byName.isDeleted ? byName : null;
 }
 
+async function allocateInvoiceNumber(ctx: any) {
+  const key = "invoice-number";
+  const counter = await ctx.db
+    .query("counters")
+    .withIndex("by_key", (q: any) => q.eq("key", key))
+    .unique();
+  if (counter) {
+    const invoiceNumber = Math.max(999, Number(counter.value || 999)) + 1;
+    await ctx.db.patch(counter._id, { value: invoiceNumber });
+    return invoiceNumber;
+  }
+
+  const invoices = await ctx.db.query("invoices").order("desc").take(5000);
+  const greatestExistingNumber = invoices.reduce(
+    (greatest: number, invoice: any) => Math.max(greatest, Number(invoice.id) || 0),
+    999,
+  );
+  const invoiceNumber = greatestExistingNumber + 1;
+  await ctx.db.insert("counters", { key, value: invoiceNumber });
+  return invoiceNumber;
+}
+
 export const createInvoice = mutation({
   args: invoiceArgs.fields,
   handler: async (ctx, args) => {
@@ -36,11 +58,12 @@ export const createInvoice = mutation({
       .unique();
 
     if (existing) {
-      return { invoiceId: existing._id, created: false };
+      return { invoiceId: existing._id, invoiceNumber: existing.id, created: false };
     }
 
-    const invoiceId = await ctx.db.insert("invoices", args);
-    return { invoiceId, created: true };
+    const invoiceNumber = await allocateInvoiceNumber(ctx);
+    const invoiceId = await ctx.db.insert("invoices", { ...args, id: invoiceNumber });
+    return { invoiceId, invoiceNumber, created: true };
   },
 });
 
@@ -57,7 +80,7 @@ export const updateInvoice = mutation({
     }
     if (existing.isDeleted === true) return existing._id;
 
-    await ctx.db.replace(existing._id, args);
+    await ctx.db.replace(existing._id, { ...args, id: existing.id });
     return existing._id;
   },
 });

@@ -1,5 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '6.3.0';
+const APP_VERSION = '6.4.0';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
@@ -340,7 +340,7 @@ async function getPendingSyncItems() {
         const transaction = idb.transaction(IDB_SYNC_QUEUE_STORE, 'readonly');
         const request = transaction.objectStore(IDB_SYNC_QUEUE_STORE).getAll();
         request.onsuccess = () => resolve((request.result || [])
-            .filter(item => ['invoice', 'product', 'category', 'customer', 'payment', 'productOrder'].includes(item.type) && item.status === 'pending')
+            .filter(item => ['invoice', 'product', 'category', 'customer', 'payment', 'productOrder', 'appSettings'].includes(item.type) && item.status === 'pending')
             .sort((a, b) => {
                 const customerPriority = Number(b.type === 'customer') - Number(a.type === 'customer');
                 return customerPriority || String(a.createdAt).localeCompare(String(b.createdAt));
@@ -565,6 +565,24 @@ async function sendProductOrderSyncItem(client, item) {
     );
 }
 
+async function sendAppSettingsSyncItem(client, item) {
+    const productsAdminCodeHash = String(item.payload && item.payload.productsAdminCodeHash || '').trim().toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(productsAdminCodeHash)) {
+        throw new Error('Products admin code hash is invalid');
+    }
+    return client.mutation(convex.anyApi.settings.upsertProductsAdminSettings, { productsAdminCodeHash });
+}
+
+async function applyAssignedInvoiceNumber(item, result) {
+    const invoiceNumber = Number(result && result.invoiceNumber);
+    const localId = String(item && item.payload && item.payload.localId || '');
+    if (!Number.isSafeInteger(invoiceNumber) || invoiceNumber < 1 || !localId) return;
+    const invoice = db.invoices.find(current => String(current.localId || '') === localId);
+    if (!invoice || Number(invoice.id) === invoiceNumber) return;
+    invoice.id = invoiceNumber;
+    await saveToIndexedDB('pos_db_abu_amir', getAppDataWithoutProducts());
+}
+
 async function sendSyncQueueItem(client, item) {
     if (item.type === 'invoice') return sendInvoiceSyncItem(client, item);
     if (item.type === 'product') return sendProductSyncItem(client, item);
@@ -572,6 +590,7 @@ async function sendSyncQueueItem(client, item) {
     if (item.type === 'customer') return sendCustomerSyncItem(client, item);
     if (item.type === 'payment') return sendPaymentSyncItem(client, item);
     if (item.type === 'productOrder') return sendProductOrderSyncItem(client, item);
+    if (item.type === 'appSettings') return sendAppSettingsSyncItem(client, item);
     throw new Error(`Unsupported sync type: ${item.type}`);
 }
 
@@ -590,7 +609,10 @@ async function syncPendingChangesToConvex() {
         const pendingItems = await getPendingSyncItems();
         for (const item of pendingItems) {
             try {
-                await sendSyncQueueItem(client, item);
+                const result = await sendSyncQueueItem(client, item);
+                if (item.type === 'invoice' && item.action === 'create') {
+                    await applyAssignedInvoiceNumber(item, result);
+                }
                 await removeSyncQueueItem(item.id);
             } catch (error) {
                 await incrementSyncQueueRetry(item.id);
@@ -630,7 +652,8 @@ function createEmptyLiveSharedDataSnapshots() {
         invoices: [],
         customers: [],
         payments: [],
-        productOrder: null
+        productOrder: null,
+        appSettings: null
     };
 }
 
@@ -816,7 +839,19 @@ async function persistDownloadedCatalog(changedProducts, deletedProductIds = [])
     });
 }
 
-async function mergeDownloadedCatalog(remoteProducts, remoteDeletedProducts, remoteCategories, remoteInvoices, remoteCustomers, remotePayments, remoteProductOrder, pendingItems) {
+function applyDownloadedProductsAdminSettings(remoteAppSettings, pendingItems) {
+    if (!remoteAppSettings || typeof remoteAppSettings !== 'object') return;
+    const hash = String(remoteAppSettings.productsAdminCodeHash || '').trim().toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(hash)) return;
+    const hasPendingSettings = pendingItems.some(item =>
+        item.status === 'pending' && item.type === 'appSettings'
+    );
+    if (hasPendingSettings) return;
+    localStorage.setItem(PRODUCTS_ADMIN_CODE_HASH_STORAGE_KEY, hash);
+    localStorage.removeItem(PRODUCTS_ADMIN_CODE_STORAGE_KEY);
+}
+
+async function mergeDownloadedCatalog(remoteProducts, remoteDeletedProducts, remoteCategories, remoteInvoices, remoteCustomers, remotePayments, remoteProductOrder, remoteAppSettings, pendingItems) {
     const pendingLocalIds = new Set(
         pendingItems
             .filter(item => item.status === 'pending' && ['product', 'category', 'invoice', 'customer'].includes(item.type))
@@ -956,6 +991,7 @@ async function mergeDownloadedCatalog(remoteProducts, remoteDeletedProducts, rem
     try {
         await persistDownloadedCatalog(changedProducts, deletedProductIds);
         await queueCustomerSyncBatch(inferredCustomers, 'create');
+        applyDownloadedProductsAdminSettings(remoteAppSettings, pendingItems);
     } catch (error) {
         db.products = previousProducts;
         db.cart = previousCart;
@@ -1000,7 +1036,7 @@ async function downloadCatalogFromConvex() {
         if (!globalThis.CONVEX_URL || !globalThis.convex || !convex.ConvexHttpClient) return false;
         const client = new convex.ConvexHttpClient(globalThis.CONVEX_URL);
         await pruneExpiredInvoicesFromConvex(client);
-        const [remoteProducts, remoteDeletedProducts, remoteCategories, remoteInvoices, remoteCustomers, remotePayments, remoteProductOrder] = await Promise.all([
+        const [remoteProducts, remoteDeletedProducts, remoteCategories, remoteInvoices, remoteCustomers, remotePayments, remoteProductOrder, remoteAppSettings] = await Promise.all([
             client.query(convex.anyApi.products.getProducts, { limit: 5000 }),
             client.query(convex.anyApi.products.getDeletedProducts, { limit: 5000 }).catch(error => {
                 console.warn('واجهة مزامنة حذف المنتجات غير منشورة بعد.', error);
@@ -1013,7 +1049,8 @@ async function downloadCatalogFromConvex() {
                 console.warn('واجهة مزامنة التسديدات غير منشورة بعد؛ ستبقى البيانات المحلية محفوظة.', error);
                 return null;
             }),
-            client.query(convex.anyApi.productOrder.getProductOrder, { key: 'pos-product-order' })
+            client.query(convex.anyApi.productOrder.getProductOrder, { key: 'pos-product-order' }),
+            client.query(convex.anyApi.settings.getProductsAdminSettings, {})
         ]);
         if (![remoteProducts, remoteCategories, remoteInvoices, remoteCustomers].every(Array.isArray)) return false;
         const pendingItems = await getPendingSyncItems();
@@ -1025,6 +1062,7 @@ async function downloadCatalogFromConvex() {
             remoteCustomers,
             remotePayments,
             remoteProductOrder,
+            remoteAppSettings,
             pendingItems
         );
         return true;
@@ -1052,7 +1090,7 @@ function renderSharedDataViews() {
 }
 
 function liveSharedDataIsReady(snapshots = liveSharedDataSnapshots) {
-    return ['products', 'deletedProducts', 'categories', 'invoices', 'customers', 'payments', 'productOrder']
+    return ['products', 'deletedProducts', 'categories', 'invoices', 'customers', 'payments', 'productOrder', 'appSettings']
         .every(key => snapshots.ready.has(key));
 }
 
@@ -1075,6 +1113,7 @@ async function applyLiveSharedDataSnapshots(generation = liveSharedDataGeneratio
             snapshots.customers,
             snapshots.payments,
             snapshots.productOrder,
+            snapshots.appSettings,
             pendingItems
         );
         lastSharedDataRefreshAt = Date.now();
@@ -1124,6 +1163,7 @@ function startLiveSharedDataSync() {
         subscribe('customers', convex.anyApi.customers.getCustomers, { limit: 5000 });
         subscribe('payments', convex.anyApi.payments.getPayments, { limit: 5000 });
         subscribe('productOrder', convex.anyApi.productOrder.getProductOrder, { key: 'pos-product-order' });
+        subscribe('appSettings', convex.anyApi.settings.getProductsAdminSettings, {});
         return true;
     } catch (error) {
         console.warn('تعذر تشغيل مزامنة Convex الفورية؛ سيستمر الفحص الدوري.', error);
@@ -1414,16 +1454,39 @@ function editCategory(id) {
     });
 }
 
-const DEFAULT_PRODUCTS_ADMIN_CODE = '200416';
+const DEFAULT_PRODUCTS_ADMIN_CODE_HASH = '6e65014740d620571badde6674b583f9dcca2caad9f3ed17b8aede12d46815de';
 const PRODUCTS_ADMIN_CODE_STORAGE_KEY = 'pos_products_admin_code';
+const PRODUCTS_ADMIN_CODE_HASH_STORAGE_KEY = 'pos_products_admin_code_hash';
 const DEFAULT_APP_LOCK_CODE = '121';
 const APP_LOCK_STORAGE_KEY = 'pos_app_locked';
 const APP_LOCK_CODE_STORAGE_KEY = 'pos_app_lock_code';
 let productsAdminNavElement = null;
 
-function getProductsAdminCode() {
-    const storedCode = String(localStorage.getItem(PRODUCTS_ADMIN_CODE_STORAGE_KEY) || '');
-    return /^\d{6}$/.test(storedCode) ? storedCode : DEFAULT_PRODUCTS_ADMIN_CODE;
+async function hashProductsAdminCode(value) {
+    if (!globalThis.crypto || !crypto.subtle) throw new Error('Secure hashing is unavailable');
+    const bytes = new TextEncoder().encode(String(value || ''));
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function getProductsAdminCodeHash() {
+    const storedHash = String(localStorage.getItem(PRODUCTS_ADMIN_CODE_HASH_STORAGE_KEY) || '').trim().toLowerCase();
+    if (/^[a-f0-9]{64}$/.test(storedHash)) return storedHash;
+
+    const legacyCode = String(localStorage.getItem(PRODUCTS_ADMIN_CODE_STORAGE_KEY) || '').trim();
+    if (/^\d{6}$/.test(legacyCode)) {
+        const migratedHash = await hashProductsAdminCode(legacyCode);
+        localStorage.setItem(PRODUCTS_ADMIN_CODE_HASH_STORAGE_KEY, migratedHash);
+        localStorage.removeItem(PRODUCTS_ADMIN_CODE_STORAGE_KEY);
+        return migratedHash;
+    }
+    return DEFAULT_PRODUCTS_ADMIN_CODE_HASH;
+}
+
+async function verifyProductsAdminCode(value) {
+    const candidate = String(value || '').trim();
+    if (!/^\d{6}$/.test(candidate)) return false;
+    return await hashProductsAdminCode(candidate) === await getProductsAdminCodeHash();
 }
 
 function changeProductsAdminCode() {
@@ -1433,13 +1496,35 @@ function changeProductsAdminCode() {
             customAlert('يجب أن يتكون رمز المنتجات من 6 أرقام.');
             return;
         }
-        customPrompt('أعد إدخال الرمز الجديد للتأكيد:', '', confirmation => {
+        customPrompt('أعد إدخال الرمز الجديد للتأكيد:', '', async confirmation => {
             if (String(confirmation || '').trim() !== newCode) {
                 customAlert('الرمزان غير متطابقين. لم يتم تغيير الرمز.');
                 return;
             }
-            localStorage.setItem(PRODUCTS_ADMIN_CODE_STORAGE_KEY, newCode);
-            customAlert('تم تغيير رمز إدارة المنتجات بنجاح.');
+            try {
+                const previousHash = await getProductsAdminCodeHash();
+                const productsAdminCodeHash = await hashProductsAdminCode(newCode);
+                localStorage.setItem(PRODUCTS_ADMIN_CODE_HASH_STORAGE_KEY, productsAdminCodeHash);
+                localStorage.removeItem(PRODUCTS_ADMIN_CODE_STORAGE_KEY);
+                try {
+                    await saveAppDataAndQueueOperation(
+                        'appSettings',
+                        'products-admin-code',
+                        'upsert',
+                        { productsAdminCodeHash }
+                    );
+                    syncChangesIfOnline();
+                } catch (error) {
+                    localStorage.setItem(PRODUCTS_ADMIN_CODE_HASH_STORAGE_KEY, previousHash);
+                    customAlert('تعذر حفظ رمز إدارة المنتجات. بقي الرمز السابق فعالاً.');
+                    return;
+                }
+                customAlert(navigator.onLine
+                    ? 'تم تغيير رمز إدارة المنتجات وسيصل إلى جميع الأجهزة.'
+                    : 'تم تغيير الرمز محلياً، وسيصل إلى جميع الأجهزة عند رجوع الإنترنت.');
+            } catch (error) {
+                customAlert('تعذر تأمين رمز إدارة المنتجات على هذا الجهاز.');
+            }
         });
     });
 }
@@ -1524,11 +1609,11 @@ function closeProductsAdminAccess() {
     productsAdminNavElement = null;
 }
 
-function confirmProductsAdminAccess() {
+async function confirmProductsAdminAccess() {
     const input = document.getElementById('productsAdminCode');
     const error = document.getElementById('productsAdminError');
     const card = document.getElementById('productsAdminCard');
-    if (input.value === getProductsAdminCode()) {
+    if (await verifyProductsAdminCode(input.value)) {
         const navElement = productsAdminNavElement;
         closeProductsAdminAccess();
         switchTab('tab-products', navElement);
@@ -2527,8 +2612,8 @@ function deleteCustomer(id, event) {
     event.stopPropagation();
     const customer = db.customers.find(c => c.id == id);
     if (!customer) return;
-    customPrompt('أدخل رمز المنتجات لحذف هذا الزبون:', '', function(code) {
-        if (String(code || '').trim() !== getProductsAdminCode()) {
+    customPrompt('أدخل رمز المنتجات لحذف هذا الزبون:', '', async function(code) {
+        if (!await verifyProductsAdminCode(code)) {
             customAlert('رمز المنتجات غير صحيح. لم يتم حذف الزبون.');
             return;
         }
@@ -2724,8 +2809,8 @@ function requestCustomerDebtEdit(customerLocalId) {
         customAlert('اختر زبوناً أولاً.');
         return;
     }
-    customPrompt('أدخل رمز المنتجات للسماح بتعديل الدين الكلي:', '', enteredCode => {
-        if (String(enteredCode || '').trim() !== getProductsAdminCode()) {
+    customPrompt('أدخل رمز المنتجات للسماح بتعديل الدين الكلي:', '', async enteredCode => {
+        if (!await verifyProductsAdminCode(enteredCode)) {
             customAlert('رمز المنتجات غير صحيح. لم يتم تعديل المبلغ.');
             return;
         }

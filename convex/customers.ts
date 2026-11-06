@@ -20,13 +20,18 @@ export const upsertCustomer = mutation({
   args: customerArgs.fields,
   handler: async (ctx, args) => {
     const existing = await findCustomer(ctx, args.localId, args.nameKey);
-    if (!existing) return await ctx.db.insert("customers", args);
-    if (Number(existing.updatedAt || 0) > args.updatedAt) return existing._id;
+    const updatedAt = Math.max(
+      Date.now(),
+      Number(existing?.updatedAt || 0) + (existing ? 1 : 0),
+      Number(args.updatedAt || 0),
+    );
+    if (!existing) return await ctx.db.insert("customers", { ...args, updatedAt });
 
     await ctx.db.replace(existing._id, {
       ...args,
       localId: existing.localId,
       archivedDebt: Number(existing.archivedDebt || 0),
+      updatedAt,
     });
     return existing._id;
   },
@@ -37,14 +42,17 @@ export const deleteCustomer = mutation({
   handler: async (ctx, args) => {
     const existing = await findCustomer(ctx, args.localId, args.nameKey);
     if (!existing) {
-      return await ctx.db.insert("customers", { ...args, isDeleted: true });
+      return await ctx.db.insert("customers", {
+        ...args,
+        updatedAt: Math.max(Date.now(), Number(args.updatedAt || 0)),
+        isDeleted: true,
+      });
     }
-    if (Number(existing.updatedAt || 0) > args.updatedAt) return existing._id;
 
     const { _id, _creationTime, ...existingFields } = existing;
     await ctx.db.replace(existing._id, {
       ...existingFields,
-      updatedAt: args.updatedAt,
+      updatedAt: Math.max(Date.now(), Number(existing.updatedAt || 0) + 1, Number(args.updatedAt || 0)),
       isDeleted: true,
     });
     return existing._id;

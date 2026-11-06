@@ -10,11 +10,13 @@ export const createProduct = mutation({
     const existing = await ctx.db.query("products")
       .withIndex("by_localId", q => q.eq("localId", args.localId)).unique();
     if (existing) return { productId: existing._id, created: false };
+    const updatedAt = Math.max(Date.now(), Number(args.updatedAt ?? 0));
     return {
       productId: await ctx.db.insert("products", {
         ...args,
-        updatedAt: args.updatedAt ?? Date.now(),
+        updatedAt,
       }),
+      updatedAt,
       created: true,
     };
   },
@@ -28,9 +30,14 @@ export const updateProduct = mutation({
     if (!existing) throw new Error("Product not found");
     if (existing.isDeleted === true) return existing._id;
     const previousStorageId = existing.storageId;
+    const updatedAt = Math.max(
+      Date.now(),
+      Number(existing.updatedAt ?? 0) + 1,
+      Number(args.updatedAt ?? 0),
+    );
     await ctx.db.replace(existing._id, {
       ...args,
-      updatedAt: args.updatedAt ?? Date.now(),
+      updatedAt,
     });
     if (previousStorageId && previousStorageId !== args.storageId) {
       const otherProduct = await ctx.db.query("products")
@@ -43,7 +50,7 @@ export const updateProduct = mutation({
         await ctx.storage.delete(previousStorageId);
       }
     }
-    return existing._id;
+    return { productId: existing._id, updatedAt };
   },
 });
 

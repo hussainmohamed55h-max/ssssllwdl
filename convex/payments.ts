@@ -15,9 +15,13 @@ export const upsertPayment = mutation({
   args: paymentArgs.fields,
   handler: async (ctx, args) => {
     const existing = await findPayment(ctx, args.localId);
-    if (!existing) return await ctx.db.insert("payments", args);
-    if (Number(existing.updatedAt || 0) > args.updatedAt) return existing._id;
-    await ctx.db.replace(existing._id, args);
+    const updatedAt = Math.max(
+      Date.now(),
+      Number(existing?.updatedAt || 0) + (existing ? 1 : 0),
+      Number(args.updatedAt || 0),
+    );
+    if (!existing) return await ctx.db.insert("payments", { ...args, updatedAt });
+    await ctx.db.replace(existing._id, { ...args, updatedAt });
     return existing._id;
   },
 });
@@ -26,9 +30,16 @@ export const deletePayment = mutation({
   args: paymentArgs.fields,
   handler: async (ctx, args) => {
     const existing = await findPayment(ctx, args.localId);
-    if (!existing) return await ctx.db.insert("payments", { ...args, isDeleted: true });
-    if (Number(existing.updatedAt || 0) > args.updatedAt) return existing._id;
-    await ctx.db.replace(existing._id, { ...args, isDeleted: true });
+    if (!existing) return await ctx.db.insert("payments", {
+      ...args,
+      updatedAt: Math.max(Date.now(), Number(args.updatedAt || 0)),
+      isDeleted: true,
+    });
+    await ctx.db.replace(existing._id, {
+      ...args,
+      updatedAt: Math.max(Date.now(), Number(existing.updatedAt || 0) + 1, Number(args.updatedAt || 0)),
+      isDeleted: true,
+    });
     return existing._id;
   },
 });

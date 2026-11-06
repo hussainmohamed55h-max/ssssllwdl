@@ -88,6 +88,12 @@ export const paymentFields = {
   isDeleted: v.optional(v.boolean()),
 };
 
+export const appSettingsFields = {
+  key: v.string(),
+  productsAdminCodeHash: v.string(),
+  updatedAt: v.number(),
+};
+
 export default defineSchema({
   invoices: defineTable(invoiceFields).index("by_localId", ["localId"]),
   products: defineTable(productFields).index("by_localId", ["localId"]),
@@ -103,5 +109,10 @@ export default defineSchema({
     productLocalIds: v.array(v.string()),
     productIds: v.array(v.number()),
     updatedAt: v.number(),
+  }).index("by_key", ["key"]),
+  appSettings: defineTable(appSettingsFields).index("by_key", ["key"]),
+  counters: defineTable({
+    key: v.string(),
+    value: v.number(),
   }).index("by_key", ["key"]),
 });

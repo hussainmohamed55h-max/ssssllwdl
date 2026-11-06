@@ -10,11 +10,13 @@ export const createCategory = mutation({
     const existing = await ctx.db.query("categories")
       .withIndex("by_localId", q => q.eq("localId", args.localId)).unique();
     if (existing) return { categoryId: existing._id, created: false };
+    const updatedAt = Math.max(Date.now(), Number(args.updatedAt ?? 0));
     return {
       categoryId: await ctx.db.insert("categories", {
         ...args,
-        updatedAt: args.updatedAt ?? Date.now(),
+        updatedAt,
       }),
+      updatedAt,
       created: true,
     };
   },
@@ -27,11 +29,16 @@ export const updateCategory = mutation({
       .withIndex("by_localId", q => q.eq("localId", args.localId)).unique();
     if (!existing) throw new Error("Category not found");
     if (existing.isDeleted === true) return existing._id;
+    const updatedAt = Math.max(
+      Date.now(),
+      Number(existing.updatedAt ?? 0) + 1,
+      Number(args.updatedAt ?? 0),
+    );
     await ctx.db.replace(existing._id, {
       ...args,
-      updatedAt: args.updatedAt ?? Date.now(),
+      updatedAt,
     });
-    return existing._id;
+    return { categoryId: existing._id, updatedAt };
   },
 });
 
