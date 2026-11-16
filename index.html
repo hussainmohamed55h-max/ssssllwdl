@@ -11,7 +11,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="style.css?v=6.4.0">
+    <link rel="stylesheet" href="style.css?v=6.5.0">
 </head>
 <body class="light-mode">
 
@@ -221,6 +221,10 @@
                 <button id="cart-customer-toggle" class="cart-customer-toggle" type="button" onclick="toggleCartCustomerSuggestions(event)" aria-label="عرض أسماء الزبائن" aria-expanded="false"><i class="fas fa-chevron-down"></i></button>
                 <div id="cart-customer-error" class="cart-customer-error" role="alert">يرجى اختيار اسم الزبون أولاً</div>
             </div>
+            <div id="cart-representative-group" class="input-group cart-representative-required">
+                <input id="cart-representative-input" placeholder="اسم المندوب..." aria-label="اسم المندوب" aria-required="true" autocomplete="name" oninput="handleRepresentativeNameInput()">
+                <div id="cart-representative-error" class="cart-representative-error" role="alert">يرجى كتابة اسم المندوب أولاً</div>
+            </div>
             <div style="display: flex; justify-content: space-between; background: var(--input-bg); padding: 10px; border-radius: 10px; margin-bottom: 15px; border: 1px solid var(--border-color);">
                 <span>الإجمالي:</span>
                 <span style="color: var(--primary-green); font-weight: bold; font-size: 20px;" id="cart-total">0 د.ع</span>
@@ -405,6 +409,6 @@
     <script src="./vendor/convex.browser.bundle.js"></script>
     <script src="./vendor/html2canvas.min.js"></script>
     <script src="./convex-config.js"></script>
-    <script src="script.js?v=6.4.0"></script>
+    <script src="script.js?v=6.5.0"></script>
 </body>
 </html>

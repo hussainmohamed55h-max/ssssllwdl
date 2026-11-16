@@ -131,6 +131,10 @@ body.admin-product-reordering { user-select:none; overscroll-behavior:none; }
 .cart-customer-error { display:none; margin-top:7px; padding:8px 10px; border-radius:9px; color:#fff; background:#d90000; font-size:12px; font-weight:800; text-align:center; box-shadow:0 4px 0 #850000; }
 .cart-customer-required.customer-name-missing input { border:3px solid #ff3232 !important; box-shadow:0 0 0 5px rgba(255,50,50,.17), 0 8px 18px rgba(170,0,0,.22); animation:customerFieldShake .52s cubic-bezier(.36,.07,.19,.97); }
 .cart-customer-required.customer-name-missing .cart-customer-error { display:block; animation:customerErrorPop .3s ease-out; }
+.cart-representative-required { margin-bottom:15px; }
+.cart-representative-error { display:none; margin-top:7px; padding:8px 10px; border-radius:9px; color:#fff; background:#d90000; font-size:12px; font-weight:800; text-align:center; box-shadow:0 4px 0 #850000; }
+.cart-representative-required.representative-name-missing input { border:3px solid #ff3232 !important; box-shadow:0 0 0 5px rgba(255,50,50,.17), 0 8px 18px rgba(170,0,0,.22); animation:customerFieldShake .52s cubic-bezier(.36,.07,.19,.97); }
+.cart-representative-required.representative-name-missing .cart-representative-error { display:block; animation:customerErrorPop .3s ease-out; }
 .cart-customer-suggestions { display:none; position:absolute; left:0; right:0; bottom:calc(100% + 7px); max-height:260px; overflow-x:hidden; overflow-y:auto; z-index:25; padding:6px; border:1px solid var(--primary-green); border-radius:13px; background:var(--card-bg); box-shadow:0 -12px 30px rgba(0,0,0,.28); scrollbar-width:thin; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; }
 .cart-customer-suggestions.open { display:grid; gap:5px; }
 .cart-customer-suggestions button { width:100%; min-width:0; display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 12px; border:1px solid var(--border-color); border-radius:9px; color:var(--text-light); background:var(--input-bg); text-align:right; cursor:pointer; }
@@ -161,6 +165,7 @@ body.admin-product-reordering { user-select:none; overscroll-behavior:none; }
 .ledger-debt-heading { display:flex; align-items:center; justify-content:center; gap:9px; }
 .ledger-debt-heading p { margin:0; }
 .invoice-row { display: flex; justify-content: space-between; background: var(--input-bg); padding: 15px; border-radius: 10px; margin-bottom: 10px; align-items: center; border: 1px solid var(--border-color); }
+.invoice-representative { color:var(--primary-green); font-weight:800; }
 
 .settlement-search-box { display:grid; gap:8px; margin-bottom:12px; }
 .settlement-search-box label { font-size:14px; font-weight:800; color:var(--text-light); }

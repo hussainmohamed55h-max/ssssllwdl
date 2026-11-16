@@ -1,5 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '6.4.0';
+const APP_VERSION = '6.5.0';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
@@ -414,6 +414,7 @@ function normalizeInvoiceForConvex(invoice) {
         })
     };
     optionalString(normalizedInvoice, 'customerLocalId', invoice.customerLocalId);
+    optionalString(normalizedInvoice, 'representativeName', invoice.representativeName);
     if (Number.isFinite(Number(invoice.createdAt)) && Number(invoice.createdAt) > 0) {
         normalizedInvoice.createdAt = Number(invoice.createdAt);
     }
@@ -697,6 +698,9 @@ function normalizeDownloadedInvoice(invoice) {
         customer: String(invoice.customer || ''),
         ...(typeof invoice.customerLocalId === 'string' && invoice.customerLocalId
             ? { customerLocalId: invoice.customerLocalId }
+            : {}),
+        ...(typeof invoice.representativeName === 'string' && invoice.representativeName
+            ? { representativeName: invoice.representativeName }
             : {}),
         phone: String(invoice.phone || ''),
         date: String(invoice.date || ''),
@@ -1258,6 +1262,7 @@ async function loadAppDatabase() {
 
     // التشغيل المبدئي للواجهة بعد اكتمال تحميل البيانات
     renderCategories(); renderProducts(); renderCustomers(); renderSettlementsTab(); updateCartCustomerSelect(); updateCartUI();
+    initializeCartRepresentativeName();
 }
 
 // دالة لحفظ أي تغيير جديد محلياً فوراً (تم التحديث لـ IndexedDB)
@@ -1276,6 +1281,7 @@ function saveLocal() {
 
 let activeCategoryFilter = 'الكل'; // متغير لتتبع الفئة المحددة
 let editingInvoiceId = null; // رقم محلي فريد أو رقم قديم لتتبع الفاتورة قيد التعديل
+const CART_REPRESENTATIVE_NAME_KEY = 'pos_representative_name';
 
 // ==========================================
 // 1. المظهر
@@ -3361,6 +3367,7 @@ function cancelEditInvoice() {
     db.cart = [];
     document.getElementById('cart-customer-input').value = '';
     clearCustomerNameWarning();
+    initializeCartRepresentativeName(true);
     
     // Reset payment button
     document.querySelectorAll('.payment-btn').forEach(b => { 
@@ -3383,13 +3390,60 @@ function cancelEditInvoice() {
 function clearCustomerNameWarning() {
     const input = document.getElementById('cart-customer-input');
     const group = document.getElementById('cart-customer-group');
-    const saveButton = document.getElementById('saveOrderBtn');
     const hasCustomerName = Boolean(input && input.value.trim());
     if (group && hasCustomerName) group.classList.remove('customer-name-missing');
     if (input) input.setAttribute('aria-invalid', hasCustomerName ? 'false' : 'true');
+    updateCartSaveReadiness();
+}
+
+function getSavedRepresentativeName() {
+    try {
+        return String(localStorage.getItem(CART_REPRESENTATIVE_NAME_KEY) || '').trim();
+    } catch (error) {
+        console.warn('تعذر قراءة اسم المندوب المحفوظ.', error);
+        return '';
+    }
+}
+
+function saveRepresentativeName(name) {
+    try {
+        localStorage.setItem(CART_REPRESENTATIVE_NAME_KEY, String(name || '').trim());
+    } catch (error) {
+        console.warn('تعذر حفظ اسم المندوب على هذا الجهاز.', error);
+    }
+}
+
+function initializeCartRepresentativeName(forceSavedName = false) {
+    const input = document.getElementById('cart-representative-input');
+    if (!input) return;
+    if (forceSavedName || !input.value.trim()) input.value = getSavedRepresentativeName();
+    clearRepresentativeNameWarning();
+}
+
+function handleRepresentativeNameInput() {
+    clearRepresentativeNameWarning();
+}
+
+function clearRepresentativeNameWarning() {
+    const input = document.getElementById('cart-representative-input');
+    const group = document.getElementById('cart-representative-group');
+    const hasRepresentativeName = Boolean(input && input.value.trim());
+    if (group && hasRepresentativeName) group.classList.remove('representative-name-missing');
+    if (input) input.setAttribute('aria-invalid', hasRepresentativeName ? 'false' : 'true');
+    updateCartSaveReadiness();
+}
+
+function updateCartSaveReadiness() {
+    const customerInput = document.getElementById('cart-customer-input');
+    const representativeInput = document.getElementById('cart-representative-input');
+    const saveButton = document.getElementById('saveOrderBtn');
+    const hasCustomerName = Boolean(customerInput && customerInput.value.trim());
+    const hasRepresentativeName = Boolean(representativeInput && representativeInput.value.trim());
+    const isReady = hasCustomerName && hasRepresentativeName;
     if (saveButton) {
-        saveButton.classList.toggle('customer-save-waiting', !hasCustomerName);
+        saveButton.classList.toggle('customer-save-waiting', !isReady);
         saveButton.dataset.customerReady = hasCustomerName ? 'true' : 'false';
+        saveButton.dataset.representativeReady = hasRepresentativeName ? 'true' : 'false';
     }
 }
 
@@ -3405,12 +3459,30 @@ function warnMissingCustomerName() {
     group.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
+function warnMissingRepresentativeName() {
+    const input = document.getElementById('cart-representative-input');
+    const group = document.getElementById('cart-representative-group');
+    if (!input || !group) return;
+    group.classList.remove('representative-name-missing');
+    void group.offsetWidth;
+    group.classList.add('representative-name-missing');
+    input.setAttribute('aria-invalid', 'true');
+    input.focus({ preventScroll: true });
+    group.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
 async function saveOrderAndShowDetails() {
     if(db.cart.length === 0) { customAlert("السلة فارغة!"); return; }
 
     const customerInput = document.getElementById('cart-customer-input');
     if (!customerInput.value.trim()) {
         warnMissingCustomerName();
+        return;
+    }
+    const representativeInput = document.getElementById('cart-representative-input');
+    const representativeName = representativeInput ? representativeInput.value.trim() : '';
+    if (!representativeName) {
+        warnMissingRepresentativeName();
         return;
     }
 
@@ -3450,6 +3522,7 @@ async function saveOrderAndShowDetails() {
             order = db.invoices[existingIndex];
             order.localId = order.localId || createInvoiceLocalId();
             order.customer = custName;
+            order.representativeName = representativeName;
             if (customerLocalId) order.customerLocalId = customerLocalId;
             else delete order.customerLocalId;
             order.phone = custPhone;
@@ -3459,13 +3532,13 @@ async function saveOrderAndShowDetails() {
             order.items = [...db.cart];
         } else {
             let orderId = db.invoices.length > 0 ? Math.max(...db.invoices.map(i => parseInt(i.id) || 1000)) + 1 : 1000;
-            order = { localId: createInvoiceLocalId(), id: orderId, customer: custName, ...(customerLocalId ? { customerLocalId } : {}), phone: custPhone, date: dateString, time: timeString, status: status, statusColor: statusColor, total: total, createdAt: Date.now(), items: [...db.cart] };
+            order = { localId: createInvoiceLocalId(), id: orderId, customer: custName, ...(customerLocalId ? { customerLocalId } : {}), representativeName, phone: custPhone, date: dateString, time: timeString, status: status, statusColor: statusColor, total: total, createdAt: Date.now(), items: [...db.cart] };
             db.invoices.push(order);
         }
         editingInvoiceId = null;
     } else {
         let orderId = db.invoices.length > 0 ? Math.max(...db.invoices.map(i => parseInt(i.id) || 1000)) + 1 : 1000;
-        order = { localId: createInvoiceLocalId(), id: orderId, customer: custName, ...(customerLocalId ? { customerLocalId } : {}), phone: custPhone, date: dateString, time: timeString, status: status, statusColor: statusColor, total: total, createdAt: Date.now(), items: [...db.cart] };
+        order = { localId: createInvoiceLocalId(), id: orderId, customer: custName, ...(customerLocalId ? { customerLocalId } : {}), representativeName, phone: custPhone, date: dateString, time: timeString, status: status, statusColor: statusColor, total: total, createdAt: Date.now(), items: [...db.cart] };
         db.invoices.push(order);
     }
     
@@ -3484,6 +3557,7 @@ async function saveOrderAndShowDetails() {
     }
 
     updateCartUI();
+    saveRepresentativeName(representativeName);
     document.getElementById('cart-customer-input').value = '';
     clearCustomerNameWarning();
     closeModal('cartModal');
@@ -3864,6 +3938,9 @@ function editInvoice(invoiceReference) {
             
             document.getElementById('cart-customer-input').value = inv.customer;
             clearCustomerNameWarning();
+            const representativeInput = document.getElementById('cart-representative-input');
+            if (representativeInput) representativeInput.value = inv.representativeName || getSavedRepresentativeName();
+            clearRepresentativeNameWarning();
             
             document.querySelectorAll('.payment-btn').forEach(b => { 
                 b.classList.remove('active'); 
@@ -3905,9 +3982,12 @@ function openLedger(name, custId) {
     else {
         custInvoices.forEach(inv => {
             const invoiceReference = encodeURIComponent(String(inv.localId || inv.id));
+            const representativeLabel = inv.representativeName
+                ? ` - <span class="invoice-representative">المندوب: ${escapeInvoiceHtml(inv.representativeName)}</span>`
+                : '';
             invHtml += `
             <div class="invoice-row">
-                <div><strong>فاتورة #${inv.id}</strong><br><span style="font-size: 12px; color: var(--text-muted);">${inv.date} ${inv.time} - ${inv.status}</span></div>
+                <div><strong>فاتورة #${inv.id}</strong><br><span style="font-size: 12px; color: var(--text-muted);">${inv.date} ${inv.time}${representativeLabel} - ${inv.status}</span></div>
                 <div style="display: flex; gap: 10px;">
                     <button class="btn-3d btn-blue" style="padding: 8px;" onclick="editInvoice(decodeURIComponent('${invoiceReference}'))"><i class="fas fa-pen"></i></button>
                     <button class="btn-3d btn-blue" style="padding: 8px;" onclick="exportToPDF(${JSON.stringify(inv).replace(/"/g, '&quot;')})"><i class="fas fa-file-pdf"></i></button>

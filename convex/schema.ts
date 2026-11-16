@@ -22,6 +22,7 @@ export const invoiceFields = {
   id: v.number(),
   customer: v.string(),
   customerLocalId: v.optional(v.string()),
+  representativeName: v.optional(v.string()),
   phone: v.string(),
   date: v.string(),
   time: v.string(),
