@@ -1,5 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '6.6.0';
+const APP_VERSION = '6.7.0';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
@@ -1298,7 +1298,7 @@ function updateSaleGridColumnButtons(columns) {
 }
 
 function setSaleGridColumns(columns, options = {}) {
-    const normalizedColumns = [2, 3, 4].includes(Number(columns)) ? Number(columns) : getDefaultSaleGridColumns();
+    const normalizedColumns = [2, 3].includes(Number(columns)) ? Number(columns) : getDefaultSaleGridColumns();
     const grid = document.getElementById('pos-products-grid');
     if (grid) grid.dataset.columns = String(normalizedColumns);
     updateSaleGridColumnButtons(normalizedColumns);
@@ -1317,7 +1317,7 @@ function initializeSaleGridColumns() {
     } catch (error) {
         console.warn('تعذر قراءة عدد أعمدة عرض المنتجات المحفوظ.', error);
     }
-    setSaleGridColumns([2, 3, 4].includes(storedColumns) ? storedColumns : getDefaultSaleGridColumns(), { persist: false });
+    setSaleGridColumns([2, 3].includes(storedColumns) ? storedColumns : getDefaultSaleGridColumns(), { persist: false });
 }
 
 // ==========================================
@@ -2418,11 +2418,11 @@ function renderProducts() {
     if (lockedProductsCountElement) lockedProductsCountElement.textContent = lockedProductsCount.toLocaleString();
     if (availableProductsCountElement) availableProductsCountElement.textContent = availableProductsCount.toLocaleString();
     
-    // Force grid-3 to avoid browser caching old grid-2 class in HTML
+    // Keep the saved 2/3-column sales setting; only the admin grid is fixed to 3 columns.
     if (posGrid) {
         posGrid.className = 'grid-3';
         posGrid.style.display = 'grid';
-        posGrid.style.gridTemplateColumns = 'repeat(3, 1fr)';
+        posGrid.style.removeProperty('grid-template-columns');
     }
     if (adminGrid) {
         adminGrid.className = 'grid-3';

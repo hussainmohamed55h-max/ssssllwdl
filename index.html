@@ -11,7 +11,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="style.css?v=6.6.0">
+    <link rel="stylesheet" href="style.css?v=6.7.0">
 </head>
 <body class="light-mode">
 
@@ -34,14 +34,6 @@
             </div>
             <div class="categories-pills" id="pos-categories-pills">
                 <div class="pill active">الكل</div>
-            </div>
-            <div class="sale-grid-columns-control" aria-label="عدد أعمدة عرض منتجات البيع">
-                <span><i class="fas fa-table-cells"></i> عرض المنتجات</span>
-                <div class="sale-grid-columns-buttons" role="group" aria-label="اختيار عدد الأعمدة">
-                    <button type="button" data-sale-columns="2" onclick="setSaleGridColumns(2)">عمودان</button>
-                    <button type="button" data-sale-columns="3" onclick="setSaleGridColumns(3)">3 أعمدة</button>
-                    <button type="button" data-sale-columns="4" onclick="setSaleGridColumns(4)">4 أعمدة</button>
-                </div>
             </div>
             <div class="grid-3" id="pos-products-grid">
                 </div>
@@ -103,6 +95,13 @@
                 <button class="btn-3d" id="themeToggleBtn" onclick="triggerFlip(this, toggleTheme)">
                     <i class="fas fa-sun"></i> المظهر: نهاري (أساسي)
                 </button>
+                <div class="sale-grid-columns-control" aria-label="عدد أعمدة عرض منتجات البيع">
+                    <span><i class="fas fa-table-cells"></i> عرض صور المنتجات في البيع</span>
+                    <div class="sale-grid-columns-buttons" role="group" aria-label="اختيار عدد الأعمدة">
+                        <button type="button" data-sale-columns="2" onclick="setSaleGridColumns(2)">صورتان</button>
+                        <button type="button" data-sale-columns="3" onclick="setSaleGridColumns(3)">3 صور</button>
+                    </div>
+                </div>
                 <hr style="border-color: rgba(128,128,128,0.2);">
                 <button id="lockApplicationBtn" class="btn-3d btn-red" onclick="triggerFlip(this, lockApplication)"><i class="fas fa-lock"></i> قفل التطبيق</button>
                 <button id="changeApplicationLockCodeBtn" class="btn-3d btn-red" onclick="triggerFlip(this, changeApplicationLockCode)"><i class="fas fa-key"></i> تغيير كلمة السر</button>
@@ -417,6 +416,6 @@
     <script src="./vendor/convex.browser.bundle.js"></script>
     <script src="./vendor/html2canvas.min.js"></script>
     <script src="./convex-config.js"></script>
-    <script src="script.js?v=6.6.0"></script>
+    <script src="script.js?v=6.7.0"></script>
 </body>
 </html>
