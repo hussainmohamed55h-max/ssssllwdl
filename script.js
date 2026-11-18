@@ -1,5 +1,5 @@
 // إعداد قاعدة البيانات IndexedDB ذات المساحة المفتوحة
-const APP_VERSION = '6.5.0';
+const APP_VERSION = '6.6.0';
 const IDB_NAME = 'POSAppDB_AbuAmir';
 const IDB_STORE = 'appStorage';
 const IDB_PRODUCTS_STORE = 'products';
@@ -1262,6 +1262,7 @@ async function loadAppDatabase() {
 
     // التشغيل المبدئي للواجهة بعد اكتمال تحميل البيانات
     renderCategories(); renderProducts(); renderCustomers(); renderSettlementsTab(); updateCartCustomerSelect(); updateCartUI();
+    initializeSaleGridColumns();
     initializeCartRepresentativeName();
 }
 
@@ -1282,6 +1283,42 @@ function saveLocal() {
 let activeCategoryFilter = 'الكل'; // متغير لتتبع الفئة المحددة
 let editingInvoiceId = null; // رقم محلي فريد أو رقم قديم لتتبع الفاتورة قيد التعديل
 const CART_REPRESENTATIVE_NAME_KEY = 'pos_representative_name';
+const SALE_GRID_COLUMNS_STORAGE_KEY = 'pos_sale_grid_columns';
+
+function getDefaultSaleGridColumns() {
+    return window.matchMedia('(max-width: 767px)').matches ? 2 : 3;
+}
+
+function updateSaleGridColumnButtons(columns) {
+    document.querySelectorAll('[data-sale-columns]').forEach(button => {
+        const isActive = Number(button.dataset.saleColumns) === Number(columns);
+        button.classList.toggle('active', isActive);
+        button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    });
+}
+
+function setSaleGridColumns(columns, options = {}) {
+    const normalizedColumns = [2, 3, 4].includes(Number(columns)) ? Number(columns) : getDefaultSaleGridColumns();
+    const grid = document.getElementById('pos-products-grid');
+    if (grid) grid.dataset.columns = String(normalizedColumns);
+    updateSaleGridColumnButtons(normalizedColumns);
+    if (options.persist === false) return;
+    try {
+        localStorage.setItem(SALE_GRID_COLUMNS_STORAGE_KEY, String(normalizedColumns));
+    } catch (error) {
+        console.warn('تعذر حفظ عدد أعمدة عرض المنتجات على هذا الجهاز.', error);
+    }
+}
+
+function initializeSaleGridColumns() {
+    let storedColumns = 0;
+    try {
+        storedColumns = Number(localStorage.getItem(SALE_GRID_COLUMNS_STORAGE_KEY));
+    } catch (error) {
+        console.warn('تعذر قراءة عدد أعمدة عرض المنتجات المحفوظ.', error);
+    }
+    setSaleGridColumns([2, 3, 4].includes(storedColumns) ? storedColumns : getDefaultSaleGridColumns(), { persist: false });
+}
 
 // ==========================================
 // 1. المظهر
@@ -3398,19 +3435,37 @@ function clearCustomerNameWarning() {
 
 function getSavedRepresentativeName() {
     try {
-        return String(localStorage.getItem(CART_REPRESENTATIVE_NAME_KEY) || '').trim();
+        return normalizeRepresentativeName(localStorage.getItem(CART_REPRESENTATIVE_NAME_KEY));
     } catch (error) {
         console.warn('تعذر قراءة اسم المندوب المحفوظ.', error);
         return '';
     }
 }
 
+function normalizeRepresentativeName(value) {
+    return String(value || '').trim().replace(/\s+/g, ' ');
+}
+
 function saveRepresentativeName(name) {
     try {
-        localStorage.setItem(CART_REPRESENTATIVE_NAME_KEY, String(name || '').trim());
+        localStorage.setItem(CART_REPRESENTATIVE_NAME_KEY, normalizeRepresentativeName(name));
     } catch (error) {
         console.warn('تعذر حفظ اسم المندوب على هذا الجهاز.', error);
     }
+}
+
+function invoiceRepresentativeNameChanged(invoice, representativeName) {
+    return normalizeRepresentativeName(invoice && invoice.representativeName) !== normalizeRepresentativeName(representativeName);
+}
+
+function requestInvoiceRepresentativeChangeAuthorization(onAuthorized) {
+    customPrompt('أدخل رمز المنتجات للسماح بتغيير اسم المندوب:', '', async enteredCode => {
+        if (!await verifyProductsAdminCode(enteredCode)) {
+            customAlert('رمز المنتجات غير صحيح. لم يتم تغيير اسم المندوب.');
+            return;
+        }
+        await onAuthorized();
+    }, { type: 'password', inputMode: 'numeric', maxLength: 6 });
 }
 
 function initializeCartRepresentativeName(forceSavedName = false) {
@@ -3471,7 +3526,7 @@ function warnMissingRepresentativeName() {
     group.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
-async function saveOrderAndShowDetails() {
+async function saveOrderAndShowDetails(options = {}) {
     if(db.cart.length === 0) { customAlert("السلة فارغة!"); return; }
 
     const customerInput = document.getElementById('cart-customer-input');
@@ -3480,9 +3535,16 @@ async function saveOrderAndShowDetails() {
         return;
     }
     const representativeInput = document.getElementById('cart-representative-input');
-    const representativeName = representativeInput ? representativeInput.value.trim() : '';
+    const representativeName = representativeInput ? normalizeRepresentativeName(representativeInput.value) : '';
     if (!representativeName) {
         warnMissingRepresentativeName();
+        return;
+    }
+    const editingInvoice = editingInvoiceId
+        ? db.invoices.find(invoice => invoiceMatchesReference(invoice, editingInvoiceId))
+        : null;
+    if (editingInvoice && invoiceRepresentativeNameChanged(editingInvoice, representativeName) && !options.representativeChangeAuthorized) {
+        requestInvoiceRepresentativeChangeAuthorization(() => saveOrderAndShowDetails({ representativeChangeAuthorized: true }));
         return;
     }
 
